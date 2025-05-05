@@ -15,7 +15,6 @@ use alloy::sol_types::SolCall; // Needed for call struct SIGNATURE if logging
 use risc0_steel::{
     alloy::primitives::{Address, U256}, // Steel re-exports alloy primitives
     ethereum::{EthEvmEnv, ETH_MAINNET_CHAIN_SPEC}, // Choose appropriate chain spec
-    // host::BlockNumberOrTag, // Not explicitly needed with .rpc() setup
     Contract, // The main steel contract interaction type
 };
 use url::Url; // For parsing URLs via clap
@@ -44,18 +43,12 @@ struct GuestInput {
     expected_total_supply: U256,
 }
 
+// Updated struct to match the new query response for tokenHolders
 #[derive(Deserialize, Debug)]
-struct SubgraphTokenHolder {
-    #[serde(rename = "holderAddress")]
-    holder_address: Address,
+struct SubgraphHolderResponse {
+    // The 'id' field now holds the holder's address string
+    id: String,
     balance: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct SubgraphTokenData {
-    holders: Vec<SubgraphTokenHolder>,
-    #[serde(rename = "totalSupply")]
-    total_supply: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -63,17 +56,17 @@ struct SubgraphResponse {
     data: SubgraphData,
 }
 
+// Updated SubgraphData to contain tokenHolders directly
 #[derive(Deserialize, Debug)]
 struct SubgraphData {
-    token: Option<SubgraphTokenData>,
+    #[serde(rename = "tokenHolders")] // Match the GraphQL query alias or field name
+    token_holders: Vec<SubgraphHolderResponse>,
 }
 
 // --- Alloy setup for Contract Calls (used by steel) ---
 sol!(
     interface IERC20 {
         function totalSupply() external view returns (uint256);
-        // balanceOf is not needed in the host for this specific logic, but keep if used elsewhere
-        // function balanceOf(address account) external view returns (uint256);
     }
 );
 
@@ -102,7 +95,6 @@ struct Args {
     /// See risc0_steel::ethereum::chain_spec for available specs.
     #[arg(long, env = "CHAIN_SPEC", default_value = "mainnet")]
     chain_spec: String,
-    // NOTE: If adding more complex chain spec handling, adjust EthEvmEnv setup below.
 }
 
 
@@ -134,25 +126,28 @@ async fn main() -> Result<()> {
     println!("\nFetching data from Subgraph...");
     let subgraph_http_client = SubgraphReqwestClient::new();
     let mut subgraph_holders: Vec<HolderData> = Vec::new();
-    let mut subgraph_total_supply = U256::ZERO;
-    let mut skip = 0;
+    // Use last_id for pagination instead of skip
+    let mut last_id = String::from(""); // Start with empty string for the first query
     const PAGE_SIZE: usize = 1000;
 
     loop {
+        // Updated GraphQL query to use id_gt for pagination
         let graphql_query_paginated = format!(
             r#"{{
-              token(id: "{}") {{
-                totalSupply # Fetch TS on first page only for efficiency
-                holders(first: {}, skip: {}, orderBy: balance, orderDirection: desc) {{
-                  holderAddress
-                  balance
-                }}
+              tokenHolders(
+                first: {},
+                orderBy: id, # Order by ID for consistent pagination
+                orderDirection: asc, # Ascending order for id_gt
+                where: {{ token: "{}", id_gt: "{}" }}
+              ) {{
+                id # This is the holder's address
+                balance
               }}
             }}"#,
-            // Subgraphs often expect lowercase addresses in IDs
-            format!("{:#x}", erc20_contract_address).to_lowercase(),
             PAGE_SIZE,
-            skip
+            // Subgraphs often expect lowercase addresses in IDs/filters
+            format!("{:#x}", erc20_contract_address).to_lowercase(),
+            last_id // Use the last fetched ID for the filter
         );
 
         let res = subgraph_http_client
@@ -180,44 +175,55 @@ async fn main() -> Result<()> {
                 body_text
             ))?;
 
-        if let Some(token_data) = response_body.data.token {
-            if skip == 0 {
-                subgraph_total_supply = U256::from_str_radix(&token_data.total_supply, 10)
-                    .context("Failed to parse total supply from subgraph")?;
+        let fetched_holders = response_body.data.token_holders;
+        let fetched_count = fetched_holders.len();
+        // Log fetched count without skip
+        println!("  Fetched page with {} holders (last_id='{}')", fetched_count, last_id);
+
+        if fetched_count == 0 {
+            // No more holders found
+            if last_id.is_empty() { // Check if this was the *first* query
+                println!("  No holders found for this token in the subgraph.");
+            } else {
+                println!("  Finished fetching all holders.");
             }
-            let fetched_count = token_data.holders.len();
-            println!("  Fetched page with {} holders (skip={})", fetched_count, skip);
-            for holder in token_data.holders {
-                subgraph_holders.push(HolderData {
-                    address: holder.holder_address,
-                    balance: U256::from_str_radix(&holder.balance, 10)
-                        .context(format!("Failed to parse balance for {}", holder.holder_address))?,
-                });
-            }
-            if fetched_count < PAGE_SIZE { break; }
-            skip += PAGE_SIZE;
-        } else {
-            println!("  Token not found in subgraph or no holders.");
             break;
         }
+
+        // Process fetched holders and update last_id
+        if let Some(last_holder) = fetched_holders.last() {
+            last_id = last_holder.id.clone(); // Update last_id for the next query
+        }
+
+        for holder_response in fetched_holders {
+            let holder_address = Address::from_str(&holder_response.id)
+                .with_context(|| format!("Failed to parse holder address from id: {}", holder_response.id))?;
+            let holder_balance = U256::from_str_radix(&holder_response.balance, 10)
+                .with_context(|| format!("Failed to parse balance for {}", holder_response.id))?;
+
+            subgraph_holders.push(HolderData {
+                address: holder_address,
+                balance: holder_balance,
+            });
+        }
+
+        // Break if the fetched count is less than the page size (last page)
+        if fetched_count < PAGE_SIZE { break; }
     }
     println!("  Fetched total {} holders from Subgraph.", subgraph_holders.len());
-    println!("  Subgraph Total Supply: {}", subgraph_total_supply);
 
     // --- Determine Top N Addresses from Fetched Data ---
-    println!("\nDetermining Top {} addresses from Subgraph data...", n);
-    // Sort holders by balance descending, address ascending as tie-breaker (mirroring guest logic)
-    let mut sorted_subgraph_holders = subgraph_holders.clone(); // Clone to keep original order if needed
+    println!("\nDetermining Top {} addresses from Subgraph data (sorting by balance)...", n);
+    let mut sorted_subgraph_holders = subgraph_holders.clone();
     sorted_subgraph_holders.sort_by(|a, b| {
         b.balance
             .cmp(&a.balance)
             .then_with(|| a.address.cmp(&b.address))
     });
 
-    // Take the top N addresses
     let determined_top_n_addresses: Vec<Address> = sorted_subgraph_holders
         .iter()
-        .take(n.min(sorted_subgraph_holders.len())) // Handle cases where n > total holders
+        .take(n.min(sorted_subgraph_holders.len()))
         .map(|h| h.address)
         .collect();
 
@@ -231,73 +237,54 @@ async fn main() -> Result<()> {
     // --- Fetch Total Supply from Blockchain (using risc0-steel) ---
     println!("\nFetching total supply from blockchain via risc0-steel...");
 
-    // 1. Create EthEvmEnv using the RPC URL (simpler setup)
     let mut env = EthEvmEnv::builder()
-        .rpc(rpc_url.clone()) // Use the RPC URL directly
-        // .block_number_or_tag(...) // Defaults to Latest, usually sufficient
+        .rpc(rpc_url.clone())
         .build()
         .await
         .context("Failed to build EthEvmEnv from RPC")?;
 
-    // 2. Set the chain specification (IMPORTANT!)
-    //    Select based on argument or keep default (Mainnet in this case)
-    //    Add more robust matching/error handling if supporting many chains.
     match args.chain_spec.to_lowercase().as_str() {
         "mainnet" => {
             env = env.with_chain_spec(&ETH_MAINNET_CHAIN_SPEC);
             println!("  Using ETH_MAINNET_CHAIN_SPEC");
         },
         "sepolia" => {
-            // Ensure you have the correct import if needed:
-            // use risc0_steel::ethereum::ETH_SEPOLIA_CHAIN_SPEC;
-            // env = env.with_chain_spec(Ð_SEPOLIA_CHAIN_SPEC);
-            // println!("  Using ETH_SEPOLIA_CHAIN_SPEC");
             anyhow::bail!("Sepolia chain spec currently commented out in code. Please uncomment/add necessary import.");
         },
-        // Add other chains as needed (e.g., optimism, arbitrum, polygon)
         _ => anyhow::bail!("Unsupported chain specification: {}", args.chain_spec),
     }
 
-    // 3. Preflight the contract interaction
     let mut contract = Contract::preflight(erc20_contract_address, &mut env);
 
-    // 4. Prepare the call data structure
     let call = IERC20::totalSupplyCall {};
 
-    // 5. Execute the call on the host
     println!(
         "  Calling {} on {}...",
-        IERC20::totalSupplyCall::SIGNATURE, // Log the function signature
+        IERC20::totalSupplyCall::SIGNATURE,
         erc20_contract_address
     );
     let result = contract
-        .call_builder(&call) // Pass the call struct reference
-        .call() // Execute the call on the host via the env
+        .call_builder(&call)
+        .call()
         .await
         .context("Failed to call totalSupply via EthEvmEnv")?;
 
-    // 6. Extract the return value
-    let onchain_total_supply: U256 = result._0; // Access the first return value
+    let onchain_total_supply: U256 = result._0;
 
     println!("  On-chain Total Supply: {}", onchain_total_supply);
 
-    // --- Decide which total supply to trust (Logic Unchanged) ---
-    let total_supply_for_guest = onchain_total_supply; // Using on-chain value
+    let total_supply_for_guest = onchain_total_supply;
 
-    // --- Prepare Guest Input ---
-    // Use the determined top N addresses for the 'claimed_top_n_addresses' field
     let guest_input = GuestInput {
-        all_holders: subgraph_holders, // Pass the original (unsorted) list or the sorted one
-        claimed_top_n_addresses: determined_top_n_addresses.clone(), // Use the list determined by the host
+        all_holders: subgraph_holders,
+        claimed_top_n_addresses: determined_top_n_addresses.clone(),
         n,
         expected_total_supply: total_supply_for_guest,
     };
 
-    // --- Execute and Prove (Unchanged) ---
     println!("\nExecuting and proving with Risk Zero zkVM...");
-    // The guest doesn't need the EVM state directly for this proof, only the holder data.
     let exec_env = ExecutorEnv::builder()
-        .write(&guest_input)? // Pass application-specific input
+        .write(&guest_input)?
         .build()?;
 
     let prover = default_prover();
@@ -306,27 +293,22 @@ async fn main() -> Result<()> {
     let receipt = prove_info.receipt;
     println!("  Proof generated successfully!");
 
-    // --- Verify the receipt (Unchanged) ---
     receipt.verify(PROVE_TOP_N_HOLDERS_ID)?;
     println!("  Receipt verified locally successfully!");
 
-    // --- Extract and Print Results ---
     let result: bool = receipt.journal.decode()?;
-    // Adjust the final messages
     println!("\nVerification Result (from ZK proof journal): {}", result);
     println!("  (Proves that the guest correctly identified the Top {} addresses based on the provided holder list and total supply)", n);
 
     println!("\nData for On-Chain Verification:");
     println!("  Image ID: {:?}", PROVE_TOP_N_HOLDERS_ID);
     println!("  Journal (Hex): 0x{}", hex::encode(&receipt.journal.bytes));
-    // Seal encoding depends on target verifier... consider Bonsai or direct seal output if needed
 
     if result {
         println!("\nConclusion: The ZK proof confirms the guest correctly determined the Top {} holders based on the provided data.", n);
         println!("  The determined Top {} addresses are: {:?}", n, determined_top_n_addresses);
     } else {
         println!("\nConclusion: The ZK proof indicates a discrepancy. The guest could NOT confirm the Top {} holders based on the provided data (e.g., total supply mismatch).", n);
-        // It's less likely to fail here if the host determines the list, unless the total supply check fails in the guest.
     }
 
     Ok(())
