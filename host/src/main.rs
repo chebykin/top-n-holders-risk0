@@ -80,13 +80,6 @@ sol!(
 
 // --- Clap Argument Parsing ---
 
-/// Helper function to parse comma-separated addresses for clap
-fn parse_addresses(s: &str) -> Result<Vec<Address>, String> {
-    s.split(',')
-        .map(|part| Address::from_str(part.trim()).map_err(|e| e.to_string()))
-        .collect()
-}
-
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Prove Top-N ERC20 Token Holders using Subgraph and Risc0", long_about = None)]
 struct Args {
@@ -105,10 +98,6 @@ struct Args {
     /// The number 'N' for Top-N holders verification.
     #[arg(long, env = "N_TOP_HOLDERS", value_parser = clap::value_parser!(usize))]
     n_top_holders: usize,
-
-    /// Comma-separated list of addresses claimed to be the Top-N (e.g., "0x...,0x...,0x...").
-    #[arg(long, env = "CLAIMED_TOP_N_ADDRS", value_parser = parse_addresses)]
-    claimed_top_n_addrs: Vec<Address>,
 
     /// Optional: Chain specification name (e.g., mainnet, sepolia). Defaults to mainnet.
     /// See risc0_steel::ethereum::chain_spec for available specs.
@@ -132,7 +121,6 @@ async fn main() -> Result<()> {
     // --- Configuration (from Args) ---
     let erc20_contract_address = args.erc20_address;
     let n = args.n_top_holders;
-    let claimed_top_n_addresses = args.claimed_top_n_addrs;
     let rpc_url = args.rpc_url; // Already Url type
     let subgraph_url = args.subgraph_url; // String
 
@@ -141,18 +129,7 @@ async fn main() -> Result<()> {
     println!("  Subgraph URL: {}", subgraph_url);
     println!("  RPC URL: {}", rpc_url);
     println!("  Chain Spec: {}", args.chain_spec); // Added chain spec info
-    // println!("  Beacon API URL: {}", beacon_api_url); // Removed
     println!("  N: {}", n);
-    println!("  Claimed Top N: {:?}", claimed_top_n_addresses);
-    if claimed_top_n_addresses.len() != n {
-        eprintln!(
-            "Warning: Number of claimed addresses ({}) does not match N ({}).",
-            claimed_top_n_addresses.len(),
-            n
-        );
-        // Consider exiting or adjusting logic if this is an error condition
-    }
-
 
     // --- Fetch Data from Subgraph (Unchanged) ---
     println!("\nFetching data from Subgraph...");
@@ -212,6 +189,29 @@ async fn main() -> Result<()> {
     println!("  Fetched total {} holders from Subgraph.", subgraph_holders.len());
     println!("  Subgraph Total Supply: {}", subgraph_total_supply);
 
+    // --- Determine Top N Addresses from Fetched Data ---
+    println!("\nDetermining Top {} addresses from Subgraph data...", n);
+    // Sort holders by balance descending, address ascending as tie-breaker (mirroring guest logic)
+    let mut sorted_subgraph_holders = subgraph_holders.clone(); // Clone to keep original order if needed
+    sorted_subgraph_holders.sort_by(|a, b| {
+        b.balance
+            .cmp(&a.balance)
+            .then_with(|| a.address.cmp(&b.address))
+    });
+
+    // Take the top N addresses
+    let determined_top_n_addresses: Vec<Address> = sorted_subgraph_holders
+        .iter()
+        .take(n.min(sorted_subgraph_holders.len())) // Handle cases where n > total holders
+        .map(|h| h.address)
+        .collect();
+
+    println!("  Determined Top {} Addresses: {:?}", n, determined_top_n_addresses);
+    if determined_top_n_addresses.len() < n && subgraph_holders.len() >= n {
+         eprintln!("Warning: Less than N addresses determined ({}) even though enough holders exist ({}). This might indicate duplicate addresses or sorting issues.", determined_top_n_addresses.len(), subgraph_holders.len());
+    } else if determined_top_n_addresses.len() < n {
+         eprintln!("Warning: Determined only {} addresses because total holders ({}) is less than N ({}).", determined_top_n_addresses.len(), subgraph_holders.len(), n);
+    }
 
     // --- Fetch Total Supply from Blockchain (using risc0-steel) ---
     println!("\nFetching total supply from blockchain via risc0-steel...");
@@ -266,14 +266,14 @@ async fn main() -> Result<()> {
 
     println!("  On-chain Total Supply: {}", onchain_total_supply);
 
-
     // --- Decide which total supply to trust (Logic Unchanged) ---
     let total_supply_for_guest = onchain_total_supply; // Using on-chain value
 
-    // --- Prepare Guest Input (Unchanged) ---
+    // --- Prepare Guest Input ---
+    // Use the determined top N addresses for the 'claimed_top_n_addresses' field
     let guest_input = GuestInput {
-        all_holders: subgraph_holders,
-        claimed_top_n_addresses: claimed_top_n_addresses.clone(),
+        all_holders: subgraph_holders, // Pass the original (unsorted) list or the sorted one
+        claimed_top_n_addresses: determined_top_n_addresses.clone(), // Use the list determined by the host
         n,
         expected_total_supply: total_supply_for_guest,
     };
@@ -295,9 +295,11 @@ async fn main() -> Result<()> {
     receipt.verify(PROVE_TOP_N_HOLDERS_ID)?;
     println!("  Receipt verified locally successfully!");
 
-    // --- Extract and Print Results (Unchanged) ---
+    // --- Extract and Print Results ---
     let result: bool = receipt.journal.decode()?;
+    // Adjust the final messages
     println!("\nVerification Result (from ZK proof journal): {}", result);
+    println!("  (Proves that the guest correctly identified the Top {} addresses based on the provided holder list and total supply)", n);
 
     println!("\nData for On-Chain Verification:");
     println!("  Image ID: {:?}", PROVE_TOP_N_HOLDERS_ID);
@@ -305,9 +307,11 @@ async fn main() -> Result<()> {
     // Seal encoding depends on target verifier... consider Bonsai or direct seal output if needed
 
     if result {
-        println!("\nConclusion: The provided list IS the correct Top {} holders.", n);
+        println!("\nConclusion: The ZK proof confirms the guest correctly determined the Top {} holders based on the provided data.", n);
+        println!("  The determined Top {} addresses are: {:?}", n, determined_top_n_addresses);
     } else {
-        println!("\nConclusion: The provided list IS NOT the correct Top {} holders.", n);
+        println!("\nConclusion: The ZK proof indicates a discrepancy. The guest could NOT confirm the Top {} holders based on the provided data (e.g., total supply mismatch).", n);
+        // It's less likely to fail here if the host determines the list, unless the total supply check fails in the guest.
     }
 
     Ok(())
