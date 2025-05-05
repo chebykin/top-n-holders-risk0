@@ -12,7 +12,6 @@ use alloy::sol;
 use alloy::sol_types::SolCall; // Needed for call struct SIGNATURE if logging
 
 // --- Risc0 Steel Imports ---
-// use risc0_steel::alloy::providers::ProviderBuilder; // No longer needed directly
 use risc0_steel::{
     alloy::primitives::{Address, U256}, // Steel re-exports alloy primitives
     ethereum::{EthEvmEnv, ETH_MAINNET_CHAIN_SPEC}, // Choose appropriate chain spec
@@ -131,7 +130,7 @@ async fn main() -> Result<()> {
     println!("  Chain Spec: {}", args.chain_spec); // Added chain spec info
     println!("  N: {}", n);
 
-    // --- Fetch Data from Subgraph (Unchanged) ---
+    // --- Fetch Data from Subgraph ---
     println!("\nFetching data from Subgraph...");
     let subgraph_http_client = SubgraphReqwestClient::new();
     let mut subgraph_holders: Vec<HolderData> = Vec::new();
@@ -160,10 +159,26 @@ async fn main() -> Result<()> {
             .post(&subgraph_url)
             .json(&serde_json::json!({ "query": graphql_query_paginated }))
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .context("Failed to send request to Subgraph")?;
 
-        let response_body: SubgraphResponse = res.json().await?;
+        let status = res.status();
+        let body_text = res.text().await.context("Failed to read Subgraph response body")?;
+
+        if !status.is_success() {
+            anyhow::bail!(
+                "Subgraph request failed with status: {}. Response body: {}",
+                status,
+                body_text
+            );
+        }
+
+        let response_body: SubgraphResponse = serde_json::from_str(&body_text)
+            .with_context(|| format!(
+                "Failed to decode Subgraph JSON response. Status: {}. Body: {}",
+                status,
+                body_text
+            ))?;
 
         if let Some(token_data) = response_body.data.token {
             if skip == 0 {
