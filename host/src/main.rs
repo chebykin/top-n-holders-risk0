@@ -1,30 +1,34 @@
 // --- Existing Imports ---
-// use alloy_primitives::{Address, U256};
 use anyhow::{Context, Result};
-use dotenv::dotenv;
 use risc0_zkvm::{default_prover, ExecutorEnv};
 use serde::{Deserialize, Serialize};
-use std::env;
+use std::str::FromStr; // For parsing Address with clap
+
+// --- Clap Imports ---
+use clap::Parser;
+
 // --- Alloy Imports ---
-// Keep sol macro and potentially primitives if used elsewhere directly
 use alloy::sol;
 use alloy::sol_types::SolCall; // Needed for call struct SIGNATURE if logging
 
 // --- Risc0 Steel Imports ---
+// use risc0_steel::alloy::providers::ProviderBuilder; // No longer needed directly
 use risc0_steel::{
-    alloy::providers::ProviderBuilder, // Steel uses alloy providers internally
-    alloy::primitives::{Address, U256},
+    alloy::primitives::{Address, U256}, // Steel re-exports alloy primitives
     ethereum::{EthEvmEnv, ETH_MAINNET_CHAIN_SPEC}, // Choose appropriate chain spec
-    host::BlockNumberOrTag,
+    // host::BlockNumberOrTag, // Not explicitly needed with .rpc() setup
     Contract, // The main steel contract interaction type
 };
-use url::Url; // For parsing URLs
+use url::Url; // For parsing URLs via clap
 
 // --- Reqwest Alias ---
 use reqwest::Client as SubgraphReqwestClient;
 
 // Import guest ELF and Image ID
 use top_n_holders_guest_methods::{PROVE_TOP_N_HOLDERS_ELF, PROVE_TOP_N_HOLDERS_ID};
+
+// --- Logging Imports ---
+use tracing_subscriber::EnvFilter;
 
 // --- Structs (Unchanged) ---
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -69,49 +73,86 @@ struct SubgraphData {
 sol!(
     interface IERC20 {
         function totalSupply() external view returns (uint256);
-        function balanceOf(address account) external view returns (uint256);
+        // balanceOf is not needed in the host for this specific logic, but keep if used elsewhere
+        // function balanceOf(address account) external view returns (uint256);
     }
 );
+
+// --- Clap Argument Parsing ---
+
+/// Helper function to parse comma-separated addresses for clap
+fn parse_addresses(s: &str) -> Result<Vec<Address>, String> {
+    s.split(',')
+        .map(|part| Address::from_str(part.trim()).map_err(|e| e.to_string()))
+        .collect()
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Prove Top-N ERC20 Token Holders using Subgraph and Risc0", long_about = None)]
+struct Args {
+    /// URL of the GraphQL Subgraph endpoint providing token holder data.
+    #[arg(long, env = "SUBGRAPH_URL")]
+    subgraph_url: String, // Keep as String, URL parsing might be too strict
+
+    /// URL of the JSON-RPC endpoint for the Ethereum node (e.g., Infura, Alchemy).
+    #[arg(long, env = "RPC_URL")]
+    rpc_url: Url,
+
+    /// Address of the ERC20 token contract to verify.
+    #[arg(long, env = "ERC20_ADDRESS", value_parser = Address::from_str)]
+    erc20_address: Address,
+
+    /// The number 'N' for Top-N holders verification.
+    #[arg(long, env = "N_TOP_HOLDERS", value_parser = clap::value_parser!(usize))]
+    n_top_holders: usize,
+
+    /// Comma-separated list of addresses claimed to be the Top-N (e.g., "0x...,0x...,0x...").
+    #[arg(long, env = "CLAIMED_TOP_N_ADDRS", value_parser = parse_addresses)]
+    claimed_top_n_addrs: Vec<Address>,
+
+    /// Optional: Chain specification name (e.g., mainnet, sepolia). Defaults to mainnet.
+    /// See risc0_steel::ethereum::chain_spec for available specs.
+    #[arg(long, env = "CHAIN_SPEC", default_value = "mainnet")]
+    chain_spec: String,
+    // NOTE: If adding more complex chain spec handling, adjust EthEvmEnv setup below.
+}
+
 
 // --- Main Host Logic ---
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing/logging if desired (like in the example)
-    // tracing_subscriber::fmt()
-    //     .with_env_filter(EnvFilter::from_default_env())
-    //     .init();
+    // Initialize tracing/logging
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env()) // Use RUST_LOG env var
+        .init();
 
-    dotenv().ok();
+    // Parse command-line arguments
+    let args = Args::parse();
 
-    // --- Configuration ---
-    let subgraph_url = env::var("SUBGRAPH_URL")
-        .context("SUBGRAPH_URL must be set")?;
-    let rpc_url_str = env::var("RPC_URL").context("RPC_URL must be set")?;
-    // Steel examples often use a Beacon API URL for state verification via EIP-4788
-    let beacon_api_url_str = env::var("BEACON_API_URL")
-        .context("BEACON_API_URL must be set (needed for EthEvmEnv builder)")?;
-    let erc20_address_str = env::var("ERC20_ADDRESS")
-        .context("ERC20_ADDRESS must be set")?;
-    let n_str = env::var("N_TOP_HOLDERS").context("N_TOP_HOLDERS must be set")?;
-    let claimed_top_n_str = env::var("CLAIMED_TOP_N_ADDRS")
-        .context("CLAIMED_TOP_N_ADDRS must be set (comma-separated list)")?;
-
-    let rpc_url: Url = rpc_url_str.parse().context("Invalid RPC_URL")?;
-    let beacon_api_url: Url = beacon_api_url_str.parse().context("Invalid BEACON_API_URL")?;
-    let erc20_contract_address: Address = erc20_address_str.parse()?;
-    let n: usize = n_str.parse()?;
-    let claimed_top_n_addresses: Vec<Address> = claimed_top_n_str
-        .split(',')
-        .map(|s| s.trim().parse::<Address>())
-        .collect::<Result<Vec<_>, _>>()?;
+    // --- Configuration (from Args) ---
+    let erc20_contract_address = args.erc20_address;
+    let n = args.n_top_holders;
+    let claimed_top_n_addresses = args.claimed_top_n_addrs;
+    let rpc_url = args.rpc_url; // Already Url type
+    let subgraph_url = args.subgraph_url; // String
 
     println!("Configuration:");
     println!("  ERC20 Contract: {}", erc20_contract_address);
     println!("  Subgraph URL: {}", subgraph_url);
     println!("  RPC URL: {}", rpc_url);
-    println!("  Beacon API URL: {}", beacon_api_url);
+    println!("  Chain Spec: {}", args.chain_spec); // Added chain spec info
+    // println!("  Beacon API URL: {}", beacon_api_url); // Removed
     println!("  N: {}", n);
     println!("  Claimed Top N: {:?}", claimed_top_n_addresses);
+    if claimed_top_n_addresses.len() != n {
+        eprintln!(
+            "Warning: Number of claimed addresses ({}) does not match N ({}).",
+            claimed_top_n_addresses.len(),
+            n
+        );
+        // Consider exiting or adjusting logic if this is an error condition
+    }
+
 
     // --- Fetch Data from Subgraph (Unchanged) ---
     println!("\nFetching data from Subgraph...");
@@ -132,7 +173,8 @@ async fn main() -> Result<()> {
                 }}
               }}
             }}"#,
-            erc20_address_str.to_lowercase(),
+            // Subgraphs often expect lowercase addresses in IDs
+            format!("{:#x}", erc20_contract_address).to_lowercase(),
             PAGE_SIZE,
             skip
         );
@@ -174,34 +216,40 @@ async fn main() -> Result<()> {
     // --- Fetch Total Supply from Blockchain (using risc0-steel) ---
     println!("\nFetching total supply from blockchain via risc0-steel...");
 
-    // 1. Create Alloy provider (used internally by EthEvmEnv)
-    // We don't need to store this provider directly usually.
-    let provider = ProviderBuilder::new().on_http(rpc_url.clone()); // Clone rpc_url if needed later
-
-    // 2. Create EthEvmEnv
+    // 1. Create EthEvmEnv using the RPC URL (simpler setup)
     let mut env = EthEvmEnv::builder()
-        .provider(provider) // Pass the provider builder result
-        // Fetch state from the latest block for totalSupply
-        .block_number_or_tag(BlockNumberOrTag::Latest)
-        .beacon_api(beacon_api_url) // Provide Beacon API URL
+        .rpc(rpc_url.clone()) // Use the RPC URL directly
+        // .block_number_or_tag(...) // Defaults to Latest, usually sufficient
         .build()
         .await
-        .context("Failed to build EthEvmEnv")?;
+        .context("Failed to build EthEvmEnv from RPC")?;
 
-    // 3. Set the chain specification (IMPORTANT!)
-    // Choose the correct spec for your network (e.g., Mainnet, Sepolia, Polygon, etc.)
-    // Find available specs in risc0_steel::ethereum::chain_spec or define your own.
-    env = env.with_chain_spec(&ETH_MAINNET_CHAIN_SPEC); // EXAMPLE: Using Sepolia spec
+    // 2. Set the chain specification (IMPORTANT!)
+    //    Select based on argument or keep default (Mainnet in this case)
+    //    Add more robust matching/error handling if supporting many chains.
+    match args.chain_spec.to_lowercase().as_str() {
+        "mainnet" => {
+            env = env.with_chain_spec(&ETH_MAINNET_CHAIN_SPEC);
+            println!("  Using ETH_MAINNET_CHAIN_SPEC");
+        },
+        "sepolia" => {
+            // Ensure you have the correct import if needed:
+            // use risc0_steel::ethereum::ETH_SEPOLIA_CHAIN_SPEC;
+            // env = env.with_chain_spec(Ð_SEPOLIA_CHAIN_SPEC);
+            // println!("  Using ETH_SEPOLIA_CHAIN_SPEC");
+            anyhow::bail!("Sepolia chain spec currently commented out in code. Please uncomment/add necessary import.");
+        },
+        // Add other chains as needed (e.g., optimism, arbitrum, polygon)
+        _ => anyhow::bail!("Unsupported chain specification: {}", args.chain_spec),
+    }
 
-    // 4. Preflight the contract interaction using Contract::preflight
-    // This prepares the environment for the call if needed by the guest later,
-    // and allows us to make the call on the host now.
+    // 3. Preflight the contract interaction
     let mut contract = Contract::preflight(erc20_contract_address, &mut env);
 
-    // 5. Prepare the call data structure (generated by alloy::sol!)
+    // 4. Prepare the call data structure
     let call = IERC20::totalSupplyCall {};
 
-    // 6. Execute the call using the contract helper and the call struct
+    // 5. Execute the call on the host
     println!(
         "  Calling {} on {}...",
         IERC20::totalSupplyCall::SIGNATURE, // Log the function signature
@@ -213,17 +261,14 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to call totalSupply via EthEvmEnv")?;
 
-    // 7. Extract the return value
+    // 6. Extract the return value
     let onchain_total_supply: U256 = result._0; // Access the first return value
 
     println!("  On-chain Total Supply: {}", onchain_total_supply);
 
 
     // --- Decide which total supply to trust (Logic Unchanged) ---
-    // It's CRITICAL that the value passed to the guest matches the sum check logic.
-    // If the Subgraph is trusted to be up-to-date, use its value.
-    // If on-chain is the source of truth, use that. Let's use on-chain here.
-    let total_supply_for_guest = onchain_total_supply; // Directly use the alloy U256
+    let total_supply_for_guest = onchain_total_supply; // Using on-chain value
 
     // --- Prepare Guest Input (Unchanged) ---
     let guest_input = GuestInput {
@@ -235,17 +280,13 @@ async fn main() -> Result<()> {
 
     // --- Execute and Prove (Unchanged) ---
     println!("\nExecuting and proving with Risk Zero zkVM...");
-    // NOTE: The `EthEvmEnv` created above is *not* automatically passed to the guest.
-    // The guest input (`guest_input`) is what's explicitly passed via `.write()`.
-    // If your *guest* needed the EVM state (input created via `env.into_input().await?`),
-    // you would `.write()` that input to the guest environment here.
-    // For this specific use case (just proving holder list matches), the guest doesn't
-    // directly need the `EthEvmEnv` input, only the holder data and expected total supply.
+    // The guest doesn't need the EVM state directly for this proof, only the holder data.
     let exec_env = ExecutorEnv::builder()
-        .write(&guest_input)? // Pass application-specific input to the guest
+        .write(&guest_input)? // Pass application-specific input
         .build()?;
 
     let prover = default_prover();
+    println!("  Running the prover...");
     let prove_info = prover.prove(exec_env, PROVE_TOP_N_HOLDERS_ELF)?;
     let receipt = prove_info.receipt;
     println!("  Proof generated successfully!");
@@ -260,8 +301,8 @@ async fn main() -> Result<()> {
 
     println!("\nData for On-Chain Verification:");
     println!("  Image ID: {:?}", PROVE_TOP_N_HOLDERS_ID);
-    println!("  Journal: 0x{}", hex::encode(&receipt.journal.bytes));
-    // Seal encoding depends on target verifier...
+    println!("  Journal (Hex): 0x{}", hex::encode(&receipt.journal.bytes));
+    // Seal encoding depends on target verifier... consider Bonsai or direct seal output if needed
 
     if result {
         println!("\nConclusion: The provided list IS the correct Top {} holders.", n);
