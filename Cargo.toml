@@ -1,27 +1,8 @@
 [workspace]
-# Defines the members (crates) included in this workspace.
-# Cargo will look for Cargo.toml files in these directories.
-members = [
-    "guest",
-    "host",
-    # Add "methods" here if you structure the ELF/ID into its own crate,
-    # which is common practice with risc0-build.
-     "methods",
-]
-
-# Optional: Default resolver version for the workspace
-resolver = "2" # Use the latest feature resolver
-
-# Optional: Define shared workspace dependencies or patch dependencies here if needed
-#[dependencies]
-# some-shared-crate = "1.0"
-#alloy-primitives = "1.1.0"
-
-# [patch.crates-io]
-# some-crate-to-patch = { git = "..." }
+members = ["host", "methods"]
+resolver = "2"
 
 [workspace.dependencies]
 
 risc0-zkvm = { version = "2.0.2" }
 risc0-steel = { git = "https://github.com/risc0/risc0-ethereum", tag = "v2.0.2" }
-#risk0-zkp = { version = "2.0.2" }

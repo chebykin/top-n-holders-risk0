@@ -355,33 +355,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alloy-primitives"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a12fe11d0b8118e551c29e1a67ccb6d01cc07ef08086df30f07487146de6fa1"
-dependencies = [
- "alloy-rlp",
- "bytes",
- "cfg-if",
- "const-hex",
- "derive_more 2.0.1",
- "foldhash",
- "hashbrown 0.15.3",
- "indexmap 2.9.0",
- "itoa",
- "k256 0.13.4",
- "keccak-asm",
- "paste",
- "proptest",
- "rand 0.9.1",
- "ruint",
- "rustc-hash",
- "serde",
- "sha3",
- "tiny-keccak",
-]
-
-[[package]]
 name = "alloy-provider"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4075,7 +4048,6 @@ checksum = "9fbfd9d094a40bf3ae768db9361049ace4c0e04a4fd6b359518bd7b73a73dd97"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.3",
- "serde",
 ]
 
 [[package]]
@@ -4114,7 +4086,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom 0.3.2",
- "serde",
 ]
 
 [[package]]
@@ -5650,15 +5621,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfb942dfe1d8e29a7ee7fcbde5bd2b9a25fb89aa70caea2eba3bee836ff41076"
 
 [[package]]
-name = "top-n-holders-guest"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives 1.1.0",
- "risc0-zkvm",
- "serde",
-]
-
-[[package]]
 name = "top-n-holders-guest-methods"
 version = "0.1.0"
 dependencies = [
@@ -5679,7 +5641,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "top-n-holders-guest",
  "top-n-holders-guest-methods",
  "tracing",
  "tracing-subscriber 0.3.19",
