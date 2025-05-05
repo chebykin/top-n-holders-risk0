@@ -1,0 +1,15 @@
+[package]
+name = "prove-top-n-holders"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+json = "0.12"
+alloy-primitives = { version = "1.1.0", features = ["serde"] }
+serde = { version = "1.0.219", features = ["derive"]}
+serde_json = "1.0.140"
+risc0-zkvm = { version = "2.0.2", default-features = false, features = [
+    "std",
+] }
