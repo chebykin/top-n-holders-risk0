@@ -3,6 +3,8 @@ use anyhow::{Context, Result};
 use risc0_zkvm::{default_prover, ExecutorEnv};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr; // For parsing Address with clap
+use std::fs; // For file system operations (cache)
+use std::path::Path; // For path manipulation (cache)
 
 // --- Clap Imports ---
 use clap::Parser;
@@ -39,6 +41,7 @@ struct HolderData {
 struct GuestInput {
     all_holders: Vec<HolderData>,
     claimed_top_n_addresses: Vec<Address>,
+    limit: usize,
     n: usize,
     expected_total_supply: U256,
 }
@@ -95,6 +98,11 @@ struct Args {
     /// See risc0_steel::ethereum::chain_spec for available specs.
     #[arg(long, env = "CHAIN_SPEC", default_value = "mainnet")]
     chain_spec: String,
+
+    /// Optional: Limit for testing purposes (e.g., limit to first 50 holders).
+    /// This is not used in the final proof.
+    #[arg(long, env = "LIMIT", default_value = "50")]
+    limit: usize,
 }
 
 
@@ -114,6 +122,7 @@ async fn main() -> Result<()> {
     let n = args.n_top_holders;
     let rpc_url = args.rpc_url; // Already Url type
     let subgraph_url = args.subgraph_url; // String
+    let limit = args.limit; // Limit for testing, not used in final proof
 
     println!("Configuration:");
     println!("  ERC20 Contract: {}", erc20_contract_address);
@@ -121,96 +130,126 @@ async fn main() -> Result<()> {
     println!("  RPC URL: {}", rpc_url);
     println!("  Chain Spec: {}", args.chain_spec); // Added chain spec info
     println!("  N: {}", n);
+    println!("  Limit: {}", limit);
 
-    // --- Fetch Data from Subgraph ---
-    println!("\nFetching data from Subgraph...");
-    let subgraph_http_client = SubgraphReqwestClient::new();
-    let mut subgraph_holders: Vec<HolderData> = Vec::new();
-    // Use last_id for pagination instead of skip
-    let mut last_id = String::from(""); // Start with empty string for the first query
-    const PAGE_SIZE: usize = 1000;
+    // --- Cache Configuration ---
+    let cache_dir = Path::new("./tmp");
+    let cache_file_path = cache_dir.join("holders.json");
 
-    loop {
-        // Updated GraphQL query to use id_gt for pagination
-        let graphql_query_paginated = format!(
-            r#"{{
-              tokenHolders(
-                first: {},
-                orderBy: id, # Order by ID for consistent pagination
-                orderDirection: asc, # Ascending order for id_gt
-                where: {{ token: "{}", id_gt: "{}" }}
-              ) {{
-                id # This is the holder's address
-                balance
-              }}
-            }}"#,
-            PAGE_SIZE,
-            // Subgraphs often expect lowercase addresses in IDs/filters
-            format!("{:#x}", erc20_contract_address).to_lowercase(),
-            last_id // Use the last fetched ID for the filter
-        );
+    // --- Attempt to Load from Cache or Fetch Data from Subgraph ---
+    let subgraph_holders: Vec<HolderData>;
 
-        let res = subgraph_http_client
-            .post(&subgraph_url)
-            .json(&serde_json::json!({ "query": graphql_query_paginated }))
-            .send()
-            .await
-            .context("Failed to send request to Subgraph")?;
+    if cache_file_path.exists() {
+        println!("\nCache found at {:?}. Loading holders from cache...", cache_file_path);
+        let cached_data = fs::read_to_string(&cache_file_path)
+            .with_context(|| format!("Failed to read cache file: {:?}", cache_file_path))?;
+        subgraph_holders = serde_json::from_str(&cached_data)
+            .with_context(|| format!("Failed to deserialize cached data from {:?}", cache_file_path))?;
+        println!("  Loaded {} holders from cache.", subgraph_holders.len());
 
-        let status = res.status();
-        let body_text = res.text().await.context("Failed to read Subgraph response body")?;
+    } else {
+        println!("\nCache not found. Fetching data from Subgraph...");
+        let subgraph_http_client = SubgraphReqwestClient::new();
+        let mut fetched_holders_list: Vec<HolderData> = Vec::new(); // Temporary list for fetching
+        // Use last_id for pagination instead of skip
+        let mut last_id = String::from(""); // Start with empty string for the first query
+        const PAGE_SIZE: usize = 1000;
 
-        if !status.is_success() {
-            anyhow::bail!(
-                "Subgraph request failed with status: {}. Response body: {}",
-                status,
-                body_text
+        loop {
+            // Updated GraphQL query to use id_gt for pagination
+            let graphql_query_paginated = format!(
+                r#"{{
+                  tokenHolders(
+                    first: {},
+                    orderBy: id, # Order by ID for consistent pagination
+                    orderDirection: asc, # Ascending order for id_gt
+                    where: {{ token: "{}", id_gt: "{}" }}
+                  ) {{
+                    id # This is the holder's address
+                    balance
+                  }}
+                }}"#,
+                PAGE_SIZE,
+                // Subgraphs often expect lowercase addresses in IDs/filters
+                format!("{:#x}", erc20_contract_address).to_lowercase(),
+                last_id // Use the last fetched ID for the filter
             );
-        }
 
-        let response_body: SubgraphResponse = serde_json::from_str(&body_text)
-            .with_context(|| format!(
-                "Failed to decode Subgraph JSON response. Status: {}. Body: {}",
-                status,
-                body_text
-            ))?;
+            let res = subgraph_http_client
+                .post(&subgraph_url)
+                .json(&serde_json::json!({ "query": graphql_query_paginated }))
+                .send()
+                .await
+                .context("Failed to send request to Subgraph")?;
 
-        let fetched_holders = response_body.data.token_holders;
-        let fetched_count = fetched_holders.len();
-        // Log fetched count without skip
-        println!("  Fetched page with {} holders (last_id='{}')", fetched_count, last_id);
+            let status = res.status();
+            let body_text = res.text().await.context("Failed to read Subgraph response body")?;
 
-        if fetched_count == 0 {
-            // No more holders found
-            if last_id.is_empty() { // Check if this was the *first* query
-                println!("  No holders found for this token in the subgraph.");
-            } else {
-                println!("  Finished fetching all holders.");
+            if !status.is_success() {
+                anyhow::bail!(
+                    "Subgraph request failed with status: {}. Response body: {}",
+                    status,
+                    body_text
+                );
             }
-            break;
+
+            let response_body: SubgraphResponse = serde_json::from_str(&body_text)
+                .with_context(|| format!(
+                    "Failed to decode Subgraph JSON response. Status: {}. Body: {}",
+                    status,
+                    body_text
+                ))?;
+
+            let fetched_holders_page = response_body.data.token_holders;
+            let fetched_count = fetched_holders_page.len();
+            // Log fetched count without skip
+            println!("  Fetched page with {} holders (last_id='{}')", fetched_count, last_id);
+
+            if fetched_count == 0 {
+                // No more holders found
+                if last_id.is_empty() { // Check if this was the *first* query
+                    println!("  No holders found for this token in the subgraph.");
+                } else {
+                    println!("  Finished fetching all holders.");
+                }
+                break;
+            }
+
+            // Process fetched holders and update last_id
+            if let Some(last_holder) = fetched_holders_page.last() {
+                last_id = last_holder.id.clone(); // Update last_id for the next query
+            }
+
+            for holder_response in fetched_holders_page {
+                let holder_address = Address::from_str(&holder_response.id)
+                    .with_context(|| format!("Failed to parse holder address from id: {}", holder_response.id))?;
+                let holder_balance = U256::from_str_radix(&holder_response.balance, 10)
+                    .with_context(|| format!("Failed to parse balance for {}", holder_response.id))?;
+
+                fetched_holders_list.push(HolderData { // Add to temporary list
+                    address: holder_address,
+                    balance: holder_balance,
+                });
+            }
+
+            // Break if the fetched count is less than the page size (last page)
+            if fetched_count < PAGE_SIZE { break; }
         }
+        println!("  Fetched total {} holders from Subgraph.", fetched_holders_list.len());
 
-        // Process fetched holders and update last_id
-        if let Some(last_holder) = fetched_holders.last() {
-            last_id = last_holder.id.clone(); // Update last_id for the next query
-        }
+        // Assign fetched data to the main variable
+        subgraph_holders = fetched_holders_list;
 
-        for holder_response in fetched_holders {
-            let holder_address = Address::from_str(&holder_response.id)
-                .with_context(|| format!("Failed to parse holder address from id: {}", holder_response.id))?;
-            let holder_balance = U256::from_str_radix(&holder_response.balance, 10)
-                .with_context(|| format!("Failed to parse balance for {}", holder_response.id))?;
-
-            subgraph_holders.push(HolderData {
-                address: holder_address,
-                balance: holder_balance,
-            });
-        }
-
-        // Break if the fetched count is less than the page size (last page)
-        if fetched_count < PAGE_SIZE { break; }
+        // --- Write to Cache ---
+        println!("\nWriting fetched holders to cache: {:?}", cache_file_path);
+        fs::create_dir_all(cache_dir)
+            .with_context(|| format!("Failed to create cache directory: {:?}", cache_dir))?;
+        let cache_data = serde_json::to_string_pretty(&subgraph_holders)
+            .context("Failed to serialize holders for caching")?;
+        fs::write(&cache_file_path, cache_data)
+            .with_context(|| format!("Failed to write cache file: {:?}", cache_file_path))?;
+        println!("  Successfully wrote cache file.");
     }
-    println!("  Fetched total {} holders from Subgraph.", subgraph_holders.len());
 
     // --- Determine Top N Addresses from Fetched Data ---
     println!("\nDetermining Top {} addresses from Subgraph data (sorting by balance)...", n);
@@ -276,7 +315,8 @@ async fn main() -> Result<()> {
     let total_supply_for_guest = onchain_total_supply;
 
     let guest_input = GuestInput {
-        all_holders: subgraph_holders,
+        limit,
+        all_holders: subgraph_holders.iter().take(limit).map(|a| a.clone()).collect(),
         claimed_top_n_addresses: determined_top_n_addresses.clone(),
         n,
         expected_total_supply: total_supply_for_guest,

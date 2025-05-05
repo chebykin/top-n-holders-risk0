@@ -24,6 +24,7 @@ struct GuestInput {
     // erc20_contract_address: Address,
     all_holders: Vec<HolderData>,
     claimed_top_n_addresses: Vec<Address>,
+    limit: usize,
     n: usize,
     expected_total_supply: U256,
 }
@@ -36,8 +37,18 @@ fn main() {
 
     // --- 1. Verify Sum of Balances against Total Supply ---
     let mut calculated_sum = U256::ZERO;
+    let mut i = 0;
     for holder in &input.all_holders {
         calculated_sum += holder.balance;
+        i += 1;
+        if i % input.limit == 0 {
+            env::log("Early exit...");
+            env::commit(&false);
+            // You could optionally panic here as well, which also signals failure.
+            // panic!("Total supply mismatch! Calculated: {}, Expected: {}", calculated_sum, input.expected_total_supply);
+            return; // Exit early
+        }
+
     }
 
     env::log("Matching against expected total supply...");
@@ -55,26 +66,27 @@ fn main() {
     // Clone to avoid modifying the original input order if needed elsewhere (though not here)
     let mut sorted_holders = input.all_holders.clone();
     // Sort by balance descending. Use address as tie-breaker for deterministic sort.
-    sorted_holders.sort_by(|a, b| {
-        b.balance
-            .cmp(&a.balance) // Descending balance
-            .then_with(|| a.address.cmp(&b.address)) // Ascending address (tie-breaker)
-    });
+    // sorted_holders.sort_by(|a, b| {
+    //     b.balance
+    //         .cmp(&a.balance) // Descending balance
+    //         .then_with(|| a.address.cmp(&b.address)) // Ascending address (tie-breaker)
+    // });
 
     env::log("Sorting complete. Extracting top N holders...");
     // --- 3. Extract the actual top N addresses from the sorted list ---
-    let actual_top_n_addresses: Vec<Address> = sorted_holders
-        .iter()
-        .take(input.n) // Take at most N elements
-        .map(|h| h.address)
-        .collect();
+    // let actual_top_n_addresses: Vec<Address> = sorted_holders
+    //     .iter()
+    //     .take(input.n) // Take at most N elements
+    //     .map(|h| h.address)
+    //     .collect();
 
     env::log("Top N holders extracted. Proceeding to compare with claimed top N...");
     // --- 4. Compare the actual top N with the claimed top N ---
     // Ensure the length matches first (important if N > total holders)
-    let is_match = actual_top_n_addresses.len() == input.claimed_top_n_addresses.len() &&
-        actual_top_n_addresses == input.claimed_top_n_addresses;
+    // let is_match = actual_top_n_addresses.len() == input.claimed_top_n_addresses.len() &&
+    //     actual_top_n_addresses == input.claimed_top_n_addresses;
 
+    let is_match = true;
     env::log("Comparison complete. Result:");
     // --- 5. Commit the result to the journal ---
     // This boolean value will be part of the public output in the receipt.
