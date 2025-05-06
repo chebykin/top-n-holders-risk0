@@ -11,7 +11,9 @@ use clap::Parser;
 
 // --- Alloy Imports ---
 use alloy::sol;
-use alloy::sol_types::SolCall; // Needed for call struct SIGNATURE if logging
+use alloy::sol_types::SolCall;
+use alloy_primitives::address;
+// Needed for call struct SIGNATURE if logging
 
 // --- Risc0 Steel Imports ---
 use risc0_steel::{
@@ -23,7 +25,7 @@ use url::Url; // For parsing URLs via clap
 
 // --- Reqwest Alias ---
 use reqwest::Client as SubgraphReqwestClient;
-use tracing::{info};
+use tracing::{error, info};
 // Import guest ELF and Image ID
 use top_n_holders_guest_methods::{TOP_N_HOLDERS_GUEST_ELF, TOP_N_HOLDERS_GUEST_ID};
 
@@ -65,6 +67,25 @@ sol!(
         function balanceOf(address account) external view returns (uint256);
         function totalSupply() external view returns (uint256);
     }
+
+    // https://github.com/mds1/multicall
+    interface IMulticall3 {
+        struct Call3 {
+            address target;
+            bool allowFailure;
+            bytes callData;
+        }
+
+        function aggregate3(Call3[] calldata calls)
+            external
+            payable
+            returns (Result[] memory returnData);
+
+        struct Result {
+            bool success;
+            bytes returnData;
+        }
+    }
 );
 
 // --- Clap Argument Parsing ---
@@ -92,6 +113,10 @@ struct Args {
     /// See risc0_steel::ethereum::chain_spec for available specs.
     #[arg(long, env = "CHAIN_SPEC", default_value = "mainnet")]
     chain_spec: String,
+
+    /// Optional: Use Multicall3 for fetching balances. Defaults to false (fetch individually).
+    #[arg(long, env = "USE_MULTICALL3", default_value_t = false)]
+    multicall3: bool,
 }
 
 // --- Main Host Logic ---
@@ -340,19 +365,83 @@ async fn main() -> Result<()> {
     println!("Required top holders/Total holders: {} / {}", required_addresses_desc.len(), all_subgraph_holders.len());
     println!("Accumulated/Last holder balance: {} / {}", accumulated_balance, last_holder_balance);
     println!("Required holders ({}): {:?}", required_addresses_desc.len(), required_addresses_desc);
-    panic!("Total holders exceed total supply");
 
     println!("\nFetching balances for required addresses from blockchain via risc0-steel...");
-    for address in &required_addresses_desc {
-        let call = IERC20::balanceOfCall {
-            account: *address,
-        };
-        println!("  Address: {}", address);
-        let _ = contract // Renamed to avoid conflict if 'result' is used later for journal
-            .call_builder(&call)
+
+    if args.multicall3 {
+        println!("  Using Multicall3 to fetch balances...");
+        // --- Multicall3 Setup ---
+        // Address of the Multicall3 contract (same on most chains)
+        // https://github.com/mds1/multicall
+        const MULTICALL3_ADDRESS: Address = address!("0xcA11bde05977b3631167028862bE2a173976CA11");
+
+        let mut multicall_contract = Contract::preflight(MULTICALL3_ADDRESS, &mut env);
+
+        let calls: Vec<IMulticall3::Call3> = required_addresses_desc
+            .iter()
+            .map(|&addr| {
+                let balance_of_call = IERC20::balanceOfCall { account: addr };
+                IMulticall3::Call3 {
+                    target: erc20_contract_address, // The ERC20 token contract
+                    allowFailure: true, // Allow individual calls to fail
+                    callData: balance_of_call.abi_encode().into(),
+                }
+            })
+            .collect();
+
+        let aggregate_call = IMulticall3::aggregate3Call { calls };
+
+        println!("  Preparing to call aggregate3 on Multicall3 contract at {}", MULTICALL3_ADDRESS);
+        let multicall_results = multicall_contract
+            .call_builder(&aggregate_call)
             .call()
             .await
-            .context("Failed to call balanceOf via EthEvmEnv")?;
+            .context("Failed to call aggregate3 on Multicall3 contract")?;
+
+        println!("  Multicall3 aggregate3 call successful. Processing {} results...", multicall_results.returnData.len());
+
+        for (i, result) in multicall_results.returnData.iter().enumerate() {
+            let holder_address = required_addresses_desc[i]; // Assuming order is preserved
+            if result.success {
+                match IERC20::balanceOfCall::abi_decode_returns(&result.returnData, true) {
+                    Ok(decoded_balance) => {
+                        info!("  Successfully fetched balance for {}: {}", holder_address, decoded_balance._0);
+                    }
+                    Err(e) => {
+                        error!("  Failed to decode balanceOf return data for {}: {:?}", holder_address, e);
+                    }
+                }
+            } else {
+                info!("  balanceOf call failed for address {} in multicall", holder_address);
+            }
+        }
+    } else {
+        println!("  Fetching balances individually (not using Multicall3)...");
+        let mut individual_balances: Vec<(Address, U256)> = Vec::new(); // To store fetched balances if needed
+
+        for (i, &holder_address) in required_addresses_desc.iter().enumerate() {
+            println!("  Fetching balance for address {} ({}/{})", holder_address, i + 1, required_addresses_desc.len());
+            let balance_of_call = IERC20::balanceOfCall { account: holder_address };
+            let mut individual_contract_instance = Contract::preflight(erc20_contract_address, &mut env);
+
+            match individual_contract_instance
+                .call_builder(&balance_of_call)
+                .call()
+                .await
+            {
+                Ok(result_balance) => {
+                    let balance: U256 = result_balance._0;
+                    info!("  Successfully fetched balance for {}: {}", holder_address, balance);
+                    individual_balances.push((holder_address, balance));
+                    // As before, this is mostly for pre-warming the EVM state for the guest.
+                }
+                Err(e) => {
+                    error!("  Failed to fetch balance for {}: {:?}", holder_address, e);
+                    // Decide how to handle individual errors, e.g., push a zero balance or skip
+                }
+            }
+        }
+        println!("  Finished fetching balances individually for {} addresses.", required_addresses_desc.len());
     }
 
     let guest_input = GuestInput {
