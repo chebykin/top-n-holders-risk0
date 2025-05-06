@@ -1,5 +1,5 @@
 [workspace]
-members = ["host", "methods", "methods/guest", "core"]
+members = ["host", "methods", "core"]
 resolver = "2"
 
 [workspace.dependencies]

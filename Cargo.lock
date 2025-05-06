@@ -6231,18 +6231,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "top-n-holders-guest"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives 0.8.25",
- "alloy-sol-types",
- "risc0-steel",
- "risc0-zkvm",
- "serde",
- "top-n-holders-core",
-]
-
-[[package]]
 name = "top-n-holders-guest-methods"
 version = "0.1.0"
 dependencies = [

@@ -77,7 +77,7 @@ fn main() {
     env::log(&alloc::format!("Fetched total supply: {}", total_supply_result._0));
 
     // --- 1.5. Verify the total supply ---
-    let mut latest_balance: Option<U256> = Some(U256::ZERO);
+    let mut latest_balance: Option<U256> = None;
     let mut top_holders_accumulated: U256 = U256::ZERO;
     let mut i = 0;
 
@@ -85,15 +85,16 @@ fn main() {
     let mut top_desc_holders: Vec<Address> = Vec::new();
     for holder_address in &guest_input.required_addresses_desc {
         let call = IERC20::balanceOfCall { account: *holder_address };
-        let contract_result = erc20_contract.call_builder(&call).call();
+        let current_balance_result = erc20_contract.call_builder(&call).call();
 
         // Check if the balance is gte than the latest balance
-        if let Some(latest) = latest_balance {
-            assert!(contract_result._0 >= latest, "Balance is not greater than or equal to the latest balance");
-        } else {
-            latest_balance = Some(contract_result._0);
+
+        if let Some(prev_balance) = latest_balance {
+            env::log(&alloc::format!("Current balance: {}, Latest balance: {}", current_balance_result._0, prev_balance));
+            assert!(current_balance_result._0 <= prev_balance, "Balance is not lower than or equal to the latest balance");
         }
-        top_holders_accumulated += contract_result._0;
+        latest_balance = Some(current_balance_result._0);
+        top_holders_accumulated += current_balance_result._0;
         top_desc_holders.push(*holder_address);
         i += 1;
 
