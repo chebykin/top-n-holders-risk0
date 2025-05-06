@@ -1,0 +1,9 @@
+[package]
+name = "top-n-holders-core"
+version = "0.12.0"
+edition = "2021"
+
+[dependencies]
+#risc0-zkp = { workspace = true, default-features = false }
+alloy-primitives = {workspace = true}
+serde = { version = "1.0", default-features = false }

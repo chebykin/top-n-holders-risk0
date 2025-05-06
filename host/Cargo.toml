@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+top-n-holders-core = { workspace = true }
+
+alloy-primitives = { workspace = true }
+alloy = { version = "0.12", features = ["default"] } # For Ethereum interaction
+
 clap = { version = "4", features = ["derive", "env"] }
 risc0-zkvm = { workspace = true }
 risc0-steel = { workspace = true, features = ["host"] }
@@ -11,7 +16,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] } # For HTTP requests (Subgraph)
-alloy = { version = "0.12", features = ["default"] } # For Ethereum interaction
 hex = "0.4"
 anyhow = "1.0" # Error handling
 

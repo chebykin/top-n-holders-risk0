@@ -4,92 +4,126 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use alloy_primitives::{Address, U256};
-use risc0_zkvm::guest::env;
 use serde::{Deserialize, Serialize};
+
+use top_n_holders_core::{GuestInput, GuestOutput};
+
+use alloy_primitives::{Address, U256};
+use alloy_sol_types::{sol};
+
+// --- Risc0 Steel Imports ---
+
+use risc0_steel::{
+    // alloy::primitives::{Address, U256},
+    ethereum::{ETH_MAINNET_CHAIN_SPEC}, // Add chain specs you need
+    Contract,
+};
+use risc0_steel::ethereum::EthEvmInput;
+use risc0_zkvm::guest::env;
 
 risc0_zkvm::guest::entry!(main);
 
-// Define the structure for holder data received from the host
+// --- Alloy setup for Contract Calls (used by steel) ---
+sol!(
+    interface IERC20 {
+        function balanceOf(address account) external view returns (uint256);
+        function totalSupply() external view returns (uint256);
+    }
+);
+
+// Define the structure for holder data, used internally after fetching balances
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 struct HolderData {
     address: Address,
     balance: U256,
 }
 
-// Define the input structure expected by the guest
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct GuestInput {
-    // Not needed inside guest if we trust host fetched correct data based on it
-    // erc20_contract_address: Address,
-    all_holders: Vec<HolderData>,
-    claimed_top_n_addresses: Vec<Address>,
-    limit: usize,
-    n: usize,
-    expected_total_supply: U256,
-}
-
 fn main() {
     // Read the input data passed from the host
-    let input: GuestInput = env::read();
+    let input: EthEvmInput = env::read();
+    let guest_input: GuestInput = env::read();
+    env::log("Guest program started. Input received.");
 
-    env::log("Summing balances and verifying top N holders...");
+    // --- 0. Initialize Steel Environment ---
 
-    // --- 1. Verify Sum of Balances against Total Supply ---
-    let mut calculated_sum = U256::ZERO;
-    let mut i = 0;
-    for holder in &input.all_holders {
-        calculated_sum += holder.balance;
-        i += 1;
-        if i % input.limit == 0 {
-            env::log("Early exit...");
-            env::commit(&false);
-            // You could optionally panic here as well, which also signals failure.
-            // panic!("Total supply mismatch! Calculated: {}, Expected: {}", calculated_sum, input.expected_total_supply);
-            return; // Exit early
+    env::log(&alloc::format!("Setting up EthEvmEnv for chain: {}", guest_input.chain_spec_name));
+    let steel_evm_env = match guest_input.chain_spec_name.to_lowercase().as_str() {
+        "mainnet" => input.into_env().with_chain_spec(&ETH_MAINNET_CHAIN_SPEC),
+        _ => {
+            env::log(&alloc::format!("Unsupported chain spec: {}", guest_input.chain_spec_name));
+            // Commit failure if chain spec is unsupported
+            env::commit(&GuestOutput {
+                verification_succeeded: false,
+                final_top_n_addresses: Vec::new(),
+            });
+            return;
         }
+    };
+    env::log("EthEvmEnv configured.");
 
+    // --- 0.5. Verifying inputs ---
+    env::log(&alloc::format!("Verifying input data..."));
+    assert!(!guest_input.required_addresses_desc.is_empty(), "Holders list is empty");
+    assert!(guest_input.n > 0, "N must be greater than 0");
+    assert!(guest_input.n <= guest_input.required_addresses_desc.len(), "N exceeds number of holders");
+
+    // --- 1. Fetch Balances for the required holders ---
+    env::log(&alloc::format!("Fetching balances for {} holders...", guest_input.required_addresses_desc.len()));
+    let erc20_contract = Contract::new(guest_input.erc20_contract_address, &steel_evm_env);
+
+    // --- 1. Fetch total supply ---
+    let call = IERC20::totalSupplyCall {};
+    let total_supply_result = erc20_contract.call_builder(&call).call();
+    env::log(&alloc::format!("Fetched total supply: {}", total_supply_result._0));
+
+    // --- 1.5. Verify the total supply ---
+    let mut latest_balance: Option<U256> = Some(U256::ZERO);
+    let mut top_holders_accumulated: U256 = U256::ZERO;
+    let mut i = 0;
+
+    // The holders array is sorted from the highest holder balance to the lowest one.
+    let mut top_desc_holders: Vec<Address> = Vec::new();
+    for holder_address in &guest_input.required_addresses_desc {
+        let call = IERC20::balanceOfCall { account: *holder_address };
+        let contract_result = erc20_contract.call_builder(&call).call();
+
+        // Check if the balance is gte than the latest balance
+        if let Some(latest) = latest_balance {
+            assert!(contract_result._0 >= latest, "Balance is not greater than or equal to the latest balance");
+        } else {
+            latest_balance = Some(contract_result._0);
+        }
+        top_holders_accumulated += contract_result._0;
+        top_desc_holders.push(*holder_address);
+        i += 1;
+
+        // for ex. total supply is 100.
+        //
+        // A has 45, cumulative 45
+        // B has 25, cumulative 70
+        // C has 14, cumulative 84
+        // D has 6, cumulative 90
+        // E has 6, cumulative 96
+        // F has 2, cumulative 98
+        if i > guest_input.n {
+            let supply_remainder: U256 = total_supply_result._0 - top_holders_accumulated;
+            assert!(supply_remainder > U256::ZERO, "Top N holders exceed total supply");
+
+            // 100 - 84 = 16; sr16 > lb14, false
+            // 100 - 90 = 10; sr10 > lb6, false
+            // 100 - 96 = 4; sr4 < lb6, true
+            env::log(&alloc::format!("Supply remainder: {}, latest balance: {}", supply_remainder, latest_balance.unwrap()));
+            if supply_remainder < latest_balance.unwrap() {
+                break;
+            }
+        }
     }
 
-    env::log("Matching against expected total supply...");
-    // If the sum doesn't match, the input data is inconsistent/incomplete.
-    if calculated_sum != input.expected_total_supply {
-        // Commit 'false' indicating failure due to inconsistent supply.
-        env::commit(&false);
-        // You could optionally panic here as well, which also signals failure.
-        // panic!("Total supply mismatch! Calculated: {}, Expected: {}", calculated_sum, input.expected_total_supply);
-        return; // Exit early
-    }
-
-    env::log("Total supply matches. Proceeding to verify top N holders...");
-    // --- 2. Sort all holders by balance (descending) ---
-    // Clone to avoid modifying the original input order if needed elsewhere (though not here)
-    let mut sorted_holders = input.all_holders.clone();
-    // Sort by balance descending. Use address as tie-breaker for deterministic sort.
-    // sorted_holders.sort_by(|a, b| {
-    //     b.balance
-    //         .cmp(&a.balance) // Descending balance
-    //         .then_with(|| a.address.cmp(&b.address)) // Ascending address (tie-breaker)
-    // });
-
-    env::log("Sorting complete. Extracting top N holders...");
-    // --- 3. Extract the actual top N addresses from the sorted list ---
-    // let actual_top_n_addresses: Vec<Address> = sorted_holders
-    //     .iter()
-    //     .take(input.n) // Take at most N elements
-    //     .map(|h| h.address)
-    //     .collect();
-
-    env::log("Top N holders extracted. Proceeding to compare with claimed top N...");
-    // --- 4. Compare the actual top N with the claimed top N ---
-    // Ensure the length matches first (important if N > total holders)
-    // let is_match = actual_top_n_addresses.len() == input.claimed_top_n_addresses.len() &&
-    //     actual_top_n_addresses == input.claimed_top_n_addresses;
-
-    let is_match = true;
-    env::log("Comparison complete. Result:");
-    // --- 5. Commit the result to the journal ---
-    // This boolean value will be part of the public output in the receipt.
-    env::commit(&is_match);
+    // --- 6. Commit the result to the journal ---
+    let output = GuestOutput {
+        verification_succeeded: true,
+        final_top_n_addresses: top_desc_holders, // Commit the determined top N
+    };
+    env::commit(&output);
     env::log("Commit complete. Exiting guest.");
 }

@@ -23,30 +23,22 @@ use url::Url; // For parsing URLs via clap
 
 // --- Reqwest Alias ---
 use reqwest::Client as SubgraphReqwestClient;
-
+use tracing::{info};
 // Import guest ELF and Image ID
-use top_n_holders_guest_methods::{PROVE_TOP_N_HOLDERS_ELF, PROVE_TOP_N_HOLDERS_ID};
+use top_n_holders_guest_methods::{TOP_N_HOLDERS_GUEST_ELF, TOP_N_HOLDERS_GUEST_ID};
 
 // --- Logging Imports ---
 use tracing_subscriber::EnvFilter;
+use top_n_holders_core::{GuestInput, GuestOutput};
+// --- Struct Definitions ---
 
-// --- Structs (Unchanged) ---
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HolderData {
     address: Address,
     balance: U256,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct GuestInput {
-    all_holders: Vec<HolderData>,
-    claimed_top_n_addresses: Vec<Address>,
-    limit: usize,
-    n: usize,
-    expected_total_supply: U256,
-}
-
-// Updated struct to match the new query response for tokenHolders
+// SubgraphHolderResponse: Structure to deserialize individual holder entries from Subgraph.
 #[derive(Deserialize, Debug)]
 struct SubgraphHolderResponse {
     // The 'id' field now holds the holder's address string
@@ -54,12 +46,13 @@ struct SubgraphHolderResponse {
     balance: String,
 }
 
+// SubgraphResponse: Structure to deserialize the top-level Subgraph API response.
 #[derive(Deserialize, Debug)]
 struct SubgraphResponse {
     data: SubgraphData,
 }
 
-// Updated SubgraphData to contain tokenHolders directly
+// SubgraphData: Structure to deserialize the 'data' part of the Subgraph response.
 #[derive(Deserialize, Debug)]
 struct SubgraphData {
     #[serde(rename = "tokenHolders")] // Match the GraphQL query alias or field name
@@ -69,6 +62,7 @@ struct SubgraphData {
 // --- Alloy setup for Contract Calls (used by steel) ---
 sol!(
     interface IERC20 {
+        function balanceOf(address account) external view returns (uint256);
         function totalSupply() external view returns (uint256);
     }
 );
@@ -98,13 +92,7 @@ struct Args {
     /// See risc0_steel::ethereum::chain_spec for available specs.
     #[arg(long, env = "CHAIN_SPEC", default_value = "mainnet")]
     chain_spec: String,
-
-    /// Optional: Limit for testing purposes (e.g., limit to first 50 holders).
-    /// This is not used in the final proof.
-    #[arg(long, env = "LIMIT", default_value = "50")]
-    limit: usize,
 }
-
 
 // --- Main Host Logic ---
 #[tokio::main]
@@ -122,33 +110,34 @@ async fn main() -> Result<()> {
     let n = args.n_top_holders;
     let rpc_url = args.rpc_url; // Already Url type
     let subgraph_url = args.subgraph_url; // String
-    let limit = args.limit; // Limit for testing, not used in final proof
 
     println!("Configuration:");
     println!("  ERC20 Contract: {}", erc20_contract_address);
     println!("  Subgraph URL: {}", subgraph_url);
     println!("  RPC URL: {}", rpc_url);
-    println!("  Chain Spec: {}", args.chain_spec); // Added chain spec info
+    println!("  Chain Spec: {}", args.chain_spec);
     println!("  N: {}", n);
-    println!("  Limit: {}", limit);
 
     // --- Cache Configuration ---
     let cache_dir = Path::new("./tmp");
-    let cache_file_path = cache_dir.join("holders.json");
+    // Changed cache file name to reflect it stores addresses only.
+    let cache_file_path = cache_dir.join("holder_addresses.json");
 
     // --- Attempt to Load from Cache or Fetch Data from Subgraph ---
-    let subgraph_holders: Vec<HolderData>;
+    // Stores addresses fetched from the Subgraph.
+    let mut all_subgraph_holders: Vec<HolderData>;
 
     if cache_file_path.exists() {
-        println!("\nCache found at {:?}. Loading holders from cache...", cache_file_path);
+        println!("\nCache found at {:?}. Loading holder addresses from cache...", cache_file_path);
         let cached_data = fs::read_to_string(&cache_file_path)
             .with_context(|| format!("Failed to read cache file: {:?}", cache_file_path))?;
-        subgraph_holders = serde_json::from_str(&cached_data)
+        // Deserialize as Vec<Address>.
+        all_subgraph_holders = serde_json::from_str(&cached_data)
             .with_context(|| format!("Failed to deserialize cached data from {:?}", cache_file_path))?;
-        println!("  Loaded {} holders from cache.", subgraph_holders.len());
+        println!("  Loaded {} holder addresses from cache.", all_subgraph_holders.len());
 
     } else {
-        println!("\nCache not found. Fetching data from Subgraph...");
+        println!("\nCache not found. Fetching holder addresses from Subgraph...");
         let subgraph_http_client = SubgraphReqwestClient::new();
         let mut fetched_holders_list: Vec<HolderData> = Vec::new(); // Temporary list for fetching
         // Use last_id for pagination instead of skip
@@ -156,7 +145,7 @@ async fn main() -> Result<()> {
         const PAGE_SIZE: usize = 1000;
 
         loop {
-            // Updated GraphQL query to use id_gt for pagination
+            // Updated GraphQL query to fetch only holder IDs (addresses)
             let graphql_query_paginated = format!(
                 r#"{{
                   tokenHolders(
@@ -203,14 +192,14 @@ async fn main() -> Result<()> {
             let fetched_holders_page = response_body.data.token_holders;
             let fetched_count = fetched_holders_page.len();
             // Log fetched count without skip
-            println!("  Fetched page with {} holders (last_id='{}')", fetched_count, last_id);
+            println!("  Fetched page with {} holder addresses (last_id='{}')", fetched_count, last_id);
 
             if fetched_count == 0 {
                 // No more holders found
                 if last_id.is_empty() { // Check if this was the *first* query
                     println!("  No holders found for this token in the subgraph.");
                 } else {
-                    println!("  Finished fetching all holders.");
+                    println!("  Finished fetching all holder addresses.");
                 }
                 break;
             }
@@ -238,46 +227,32 @@ async fn main() -> Result<()> {
         println!("  Fetched total {} holders from Subgraph.", fetched_holders_list.len());
 
         // Assign fetched data to the main variable
-        subgraph_holders = fetched_holders_list;
+        all_subgraph_holders = fetched_holders_list;
 
         // --- Write to Cache ---
-        println!("\nWriting fetched holders to cache: {:?}", cache_file_path);
+        println!("\nWriting fetched holder addresses to cache: {:?}", cache_file_path);
         fs::create_dir_all(cache_dir)
             .with_context(|| format!("Failed to create cache directory: {:?}", cache_dir))?;
-        let cache_data = serde_json::to_string_pretty(&subgraph_holders)
-            .context("Failed to serialize holders for caching")?;
+        // Serialize Vec<Address> for caching.
+        let cache_data = serde_json::to_string_pretty(&all_subgraph_holders)
+            .context("Failed to serialize holder addresses for caching")?;
         fs::write(&cache_file_path, cache_data)
             .with_context(|| format!("Failed to write cache file: {:?}", cache_file_path))?;
         println!("  Successfully wrote cache file.");
     }
 
-    // --- Determine Top N Addresses from Fetched Data ---
-    println!("\nDetermining Top {} addresses from Subgraph data (sorting by balance)...", n);
-    let mut sorted_subgraph_holders = subgraph_holders.clone();
-    sorted_subgraph_holders.sort_by(|a, b| {
-        b.balance
-            .cmp(&a.balance)
-            .then_with(|| a.address.cmp(&b.address))
-    });
-
-    let determined_top_n_addresses: Vec<Address> = sorted_subgraph_holders
-        .iter()
-        .take(n.min(sorted_subgraph_holders.len()))
-        .map(|h| h.address)
-        .collect();
-
-    println!("  Determined Top {} Addresses: {:?}", n, determined_top_n_addresses);
-    if determined_top_n_addresses.len() < n && subgraph_holders.len() >= n {
-         eprintln!("Warning: Less than N addresses determined ({}) even though enough holders exist ({}). This might indicate duplicate addresses or sorting issues.", determined_top_n_addresses.len(), subgraph_holders.len());
-    } else if determined_top_n_addresses.len() < n {
-         eprintln!("Warning: Determined only {} addresses because total holders ({}) is less than N ({}).", determined_top_n_addresses.len(), subgraph_holders.len(), n);
-    }
+    // Host no longer determines Top-N directly. Guest will do this.
+    println!(
+        "\nSubgraph fetch complete. {} holder addresses will be passed to the ZKVM guest.",
+        all_subgraph_holders.len()
+    );
+    println!("The guest will fetch balances on-chain, sort, verify total supply, and determine the Top {} holders.", n);
 
     // --- Fetch Total Supply from Blockchain (using risc0-steel) ---
     println!("\nFetching total supply from blockchain via risc0-steel...");
 
     let mut env = EthEvmEnv::builder()
-        .rpc(rpc_url.clone())
+        .rpc(rpc_url.clone()) // Ensure rpc_url is correctly passed
         .build()
         .await
         .context("Failed to build EthEvmEnv from RPC")?;
@@ -302,53 +277,132 @@ async fn main() -> Result<()> {
         IERC20::totalSupplyCall::SIGNATURE,
         erc20_contract_address
     );
-    let result = contract
+    let result_supply = contract // Renamed to avoid conflict if 'result' is used later for journal
         .call_builder(&call)
         .call()
         .await
         .context("Failed to call totalSupply via EthEvmEnv")?;
 
-    let onchain_total_supply: U256 = result._0;
+    let onchain_total_supply: U256 = result_supply._0;
 
     println!("  On-chain Total Supply: {}", onchain_total_supply);
 
-    let total_supply_for_guest = onchain_total_supply;
+    // --- Prepare Input for ZKVM Guest ---
+    // The host provides its initial claim for the top N addresses.
+    // This is at least N addresses from the subgraph, sorted by balance.
+    // But usually it requires more than N to ensure the guest can determine the top N.
+    // The guest will verify this claim by fetching balances and ensuring descending order.
+
+    // Sort holders by descending balance
+    all_subgraph_holders
+        .sort_by(|a, b| {
+            b.balance
+                .cmp(&a.balance) // Descending balance
+                .then_with(|| a.address.cmp(&b.address)) // Ascending address (tie-breaker)
+        });
+
+    // TODO: determine the holders required for the proof. Usually should be more than N.
+    let mut required_addresses_desc: Vec<Address> = Vec::new();
+    let mut accumulated_balance: U256 = U256::ZERO;
+    let mut last_holder_balance: U256 = U256::ZERO;
+    let mut threshold_balance: Option<U256> = None;
+    let mut i = 0;
+    // for ex. total supply is 100.
+    //
+    // A has 45, cumulative 45
+    // B has 25, cumulative 70
+    // C has 14, cumulative 84
+    // D has 6, cumulative 90
+    // E has 6, cumulative 96
+    // F has 2, cumulative 98
+    for holder in all_subgraph_holders.iter() {
+        accumulated_balance += holder.balance;
+        last_holder_balance = holder.balance;
+        i += 1;
+        if i == n {
+            threshold_balance = Some(holder.balance);
+        }
+
+        required_addresses_desc.push(holder.address);
+        // 100 - 84 = 16; sr16 > lb14, false
+        // 100 - 90 = 10; sr10 > lb6, false
+        // 100 - 96 = 4; sr4 < lb6, true
+        // sr4100 < lb1;
+        if let Some(threshold) = threshold_balance {
+            let remainder = onchain_total_supply - accumulated_balance;
+            info!("#{} Holder: {} - Balance: {}, Threshold: {}, Remainder: {}", i, holder.address, holder.balance, threshold, remainder);
+            info!("{} < {}", threshold, remainder);
+            if threshold > remainder {
+                break;
+            }
+        }
+    }
+    println!("Required top holders/Total holders: {} / {}", required_addresses_desc.len(), all_subgraph_holders.len());
+    println!("Accumulated/Last holder balance: {} / {}", accumulated_balance, last_holder_balance);
+    println!("Required holders ({}): {:?}", required_addresses_desc.len(), required_addresses_desc);
+    panic!("Total holders exceed total supply");
+
+    println!("\nFetching balances for required addresses from blockchain via risc0-steel...");
+    for address in &required_addresses_desc {
+        let call = IERC20::balanceOfCall {
+            account: *address,
+        };
+        println!("  Address: {}", address);
+        let _ = contract // Renamed to avoid conflict if 'result' is used later for journal
+            .call_builder(&call)
+            .call()
+            .await
+            .context("Failed to call balanceOf via EthEvmEnv")?;
+    }
 
     let guest_input = GuestInput {
-        limit,
-        all_holders: subgraph_holders.iter().take(limit).map(|a| a.clone()).collect(),
-        claimed_top_n_addresses: determined_top_n_addresses.clone(),
+        required_addresses_desc,
         n,
-        expected_total_supply: total_supply_for_guest,
+        erc20_contract_address,
+        chain_spec_name: args.chain_spec.clone(), // Pass chain spec name
     };
+
+    let evm_input = env.into_input().await?;
 
     println!("\nExecuting and proving with Risk Zero zkVM...");
     let exec_env = ExecutorEnv::builder()
+        .write(&evm_input)?
         .write(&guest_input)?
         .build()?;
 
     let prover = default_prover();
     println!("  Running the prover...");
-    let prove_info = prover.prove(exec_env, PROVE_TOP_N_HOLDERS_ELF)?;
+    let prove_info = prover.prove(exec_env, TOP_N_HOLDERS_GUEST_ELF)?;
     let receipt = prove_info.receipt;
     println!("  Proof generated successfully!");
 
-    receipt.verify(PROVE_TOP_N_HOLDERS_ID)?;
+    receipt.verify(TOP_N_HOLDERS_GUEST_ID)?;
     println!("  Receipt verified locally successfully!");
 
-    let result: bool = receipt.journal.decode()?;
-    println!("\nVerification Result (from ZK proof journal): {}", result);
-    println!("  (Proves that the guest correctly identified the Top {} addresses based on the provided holder list and total supply)", n);
+    // Decode GuestOutput from the journal.
+    let guest_output: GuestOutput = receipt.journal.decode()
+        .context("Failed to decode GuestOutput from ZKVM journal")?;
+
+    println!("\nVerification Result (from ZK proof journal):");
+    println!("  Guest Verification Succeeded: {}", guest_output.verification_succeeded);
+    println!("  Guest Determined Top {} Addresses: {:?}", n, guest_output.final_top_n_addresses);
+    println!("  (Proof implies guest correctly fetched balances, sorted, checked total supply, and compared against host's claimed Top {} addresses)", n);
 
     println!("\nData for On-Chain Verification:");
-    println!("  Image ID: {:?}", PROVE_TOP_N_HOLDERS_ID);
+    println!("  Image ID: {:?}", TOP_N_HOLDERS_GUEST_ID);
     println!("  Journal (Hex): 0x{}", hex::encode(&receipt.journal.bytes));
 
-    if result {
-        println!("\nConclusion: The ZK proof confirms the guest correctly determined the Top {} holders based on the provided data.", n);
-        println!("  The determined Top {} addresses are: {:?}", n, determined_top_n_addresses);
+    if guest_output.verification_succeeded {
+        println!("\nConclusion: The ZK proof confirms the guest correctly determined the Top {} holders, verified total supply, and that these match the host's initial claim.", n);
+        println!("  The determined Top {} addresses by the guest are: {:?}", n, guest_output.final_top_n_addresses);
     } else {
-        println!("\nConclusion: The ZK proof indicates a discrepancy. The guest could NOT confirm the Top {} holders based on the provided data (e.g., total supply mismatch).", n);
+        println!("\nConclusion: The ZK proof indicates a discrepancy or failure in guest execution.");
+        println!("  This could be due to: total supply mismatch, or the guest's determined Top-N differs from the host's claimed Top-N, or other internal guest error.");
+        if !guest_output.final_top_n_addresses.is_empty() {
+             println!("  Guest's determined Top {} addresses (if available): {:?}", n, guest_output.final_top_n_addresses);
+        } else {
+            println!("  Guest did not determine/output Top-N addresses, or an earlier error occurred (e.g., balance fetch, total supply mismatch).");
+        }
     }
 
     Ok(())
