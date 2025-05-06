@@ -1690,7 +1690,6 @@ dependencies = [
  "risc0-bigint2",
  "serdect",
  "sha2",
- "signature",
 ]
 
 [[package]]
