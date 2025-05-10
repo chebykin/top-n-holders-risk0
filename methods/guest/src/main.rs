@@ -14,8 +14,9 @@ use alloy_sol_types::{sol};
 // --- Risc0 Steel Imports ---
 
 use risc0_steel::{
-    // alloy::primitives::{Address, U256},
-    ethereum::{ETH_MAINNET_CHAIN_SPEC}, // Add chain specs you need
+    ethereum::{
+        ETH_MAINNET_CHAIN_SPEC,
+    },
     Contract,
 };
 use risc0_steel::ethereum::EthEvmInput;
@@ -49,15 +50,7 @@ fn main() {
     env::log(&alloc::format!("Setting up EthEvmEnv for chain: {}", guest_input.chain_spec_name));
     let steel_evm_env = match guest_input.chain_spec_name.to_lowercase().as_str() {
         "mainnet" => input.into_env().with_chain_spec(&ETH_MAINNET_CHAIN_SPEC),
-        _ => {
-            env::log(&alloc::format!("Unsupported chain spec: {}", guest_input.chain_spec_name));
-            // Commit failure if chain spec is unsupported
-            env::commit(&GuestOutput {
-                verification_succeeded: false,
-                final_top_n_addresses: Vec::new(),
-            });
-            return;
-        }
+        _ => input.into_env(),
     };
     env::log("EthEvmEnv configured.");
 

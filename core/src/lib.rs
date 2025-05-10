@@ -1,12 +1,5 @@
-// use risc0_zkvm::sha::Digest;
-use alloy_primitives::{Address};
+use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
-
-// #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-// pub struct Outputs {
-//     pub data: u32,
-//     pub hash: Digest,
-// }
 
 // GuestInput: Data passed from the host to the ZKVM guest program.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -24,3 +17,13 @@ pub struct GuestOutput {
     pub verification_succeeded: bool,       // True if all guest-side checks passed.
     pub final_top_n_addresses: Vec<Address>, // The Top-N addresses determined by the guest.
 }
+
+//// The Gnosis Mainnet [ChainSpec] (Block numbers could be incorrect).
+// pub static GNOSIS_MAINNET_CHAIN_SPEC: LazyLock<ChainSpec> = LazyLock::new(|| ChainSpec {
+//     chain_id: 100,
+//     forks: BTreeMap::from([
+//         (SpecId::MERGE, ForkCondition::Block(25139031)),    // Approx. Dec 8, 2022
+//         (SpecId::SHANGHAI, ForkCondition::Timestamp(1689076787)), // July 11, 2023
+//         (SpecId::CANCUN, ForkCondition::Timestamp(1710167400)), // March 11, 2024, 14:30 UTC
+//     ]),
+// });

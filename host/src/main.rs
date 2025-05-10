@@ -25,7 +25,7 @@ use url::Url; // For parsing URLs via clap
 
 // --- Reqwest Alias ---
 use reqwest::Client as SubgraphReqwestClient;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 // Import guest ELF and Image ID
 use top_n_holders_guest_methods::{TOP_N_HOLDERS_GUEST_ELF, TOP_N_HOLDERS_GUEST_ID};
 
@@ -287,10 +287,7 @@ async fn main() -> Result<()> {
             env = env.with_chain_spec(&ETH_MAINNET_CHAIN_SPEC);
             println!("  Using ETH_MAINNET_CHAIN_SPEC");
         },
-        "sepolia" => {
-            anyhow::bail!("Sepolia chain spec currently commented out in code. Please uncomment/add necessary import.");
-        },
-        _ => anyhow::bail!("Unsupported chain specification: {}", args.chain_spec),
+        _ => warn!("Chain spec not recognized. These mean the hardfork block numbers are not recognised. Thus there could be issues in proof generation."),
     }
 
     let mut contract = Contract::preflight(erc20_contract_address, &mut env);
