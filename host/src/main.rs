@@ -117,6 +117,10 @@ struct Args {
     /// Optional: Use Multicall3 for fetching balances. Defaults to false (fetch individually).
     #[arg(long, env = "USE_MULTICALL3", default_value_t = false)]
     multicall3: bool,
+
+    /// Optional: Cache Subgraph responses. Defaults to false.
+    #[arg(long, env = "CACHE_SUBGRAPH", default_value_t = false)]
+    cache_subgraph: bool,
 }
 
 // --- Main Host Logic ---
@@ -145,14 +149,18 @@ async fn main() -> Result<()> {
 
     // --- Cache Configuration ---
     let cache_dir = Path::new("./tmp");
-    // Changed cache file name to reflect it stores addresses only.
-    let cache_file_path = cache_dir.join("holder_addresses.json");
+    let cache_file_name = format!(
+        "{}-{:#x}.json",
+        args.chain_spec.to_lowercase(),
+        erc20_contract_address
+    );
+    let cache_file_path = cache_dir.join(cache_file_name);
 
     // --- Attempt to Load from Cache or Fetch Data from Subgraph ---
     // Stores addresses fetched from the Subgraph.
     let mut all_subgraph_holders: Vec<HolderData>;
 
-    if cache_file_path.exists() {
+    if args.cache_subgraph && cache_file_path.exists() {
         println!("\nCache found at {:?}. Loading holder addresses from cache...", cache_file_path);
         let cached_data = fs::read_to_string(&cache_file_path)
             .with_context(|| format!("Failed to read cache file: {:?}", cache_file_path))?;
@@ -162,7 +170,11 @@ async fn main() -> Result<()> {
         println!("  Loaded {} holder addresses from cache.", all_subgraph_holders.len());
 
     } else {
-        println!("\nCache not found. Fetching holder addresses from Subgraph...");
+        if args.cache_subgraph {
+            println!("\nCache not found or --cache-subgraph not specified. Fetching holder addresses from Subgraph...");
+        } else {
+            println!("\nFetching holder addresses from Subgraph (caching disabled)...");
+        }
         let subgraph_http_client = SubgraphReqwestClient::new();
         let mut fetched_holders_list: Vec<HolderData> = Vec::new(); // Temporary list for fetching
         // Use last_id for pagination instead of skip
@@ -255,15 +267,17 @@ async fn main() -> Result<()> {
         all_subgraph_holders = fetched_holders_list;
 
         // --- Write to Cache ---
-        println!("\nWriting fetched holder addresses to cache: {:?}", cache_file_path);
-        fs::create_dir_all(cache_dir)
-            .with_context(|| format!("Failed to create cache directory: {:?}", cache_dir))?;
-        // Serialize Vec<Address> for caching.
-        let cache_data = serde_json::to_string_pretty(&all_subgraph_holders)
-            .context("Failed to serialize holder addresses for caching")?;
-        fs::write(&cache_file_path, cache_data)
-            .with_context(|| format!("Failed to write cache file: {:?}", cache_file_path))?;
-        println!("  Successfully wrote cache file.");
+        if args.cache_subgraph {
+            println!("\nWriting fetched holder addresses to cache: {:?}", cache_file_path);
+            fs::create_dir_all(cache_dir)
+                .with_context(|| format!("Failed to create cache directory: {:?}", cache_dir))?;
+            // Serialize Vec<Address> for caching.
+            let cache_data = serde_json::to_string_pretty(&all_subgraph_holders)
+                .context("Failed to serialize holder addresses for caching")?;
+            fs::write(&cache_file_path, cache_data)
+                .with_context(|| format!("Failed to write cache file: {:?}", cache_file_path))?;
+            println!("  Successfully wrote cache file.");
+        }
     }
 
     // Host no longer determines Top-N directly. Guest will do this.
