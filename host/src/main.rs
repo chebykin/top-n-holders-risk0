@@ -109,9 +109,9 @@ struct Args {
     #[arg(long, env = "N_TOP_HOLDERS", value_parser = clap::value_parser!(usize))]
     n_top_holders: usize,
 
-    /// Optional: Chain specification name (e.g., mainnet, sepolia). Defaults to mainnet.
+    /// Optional: Chain specification name (e.g., mainnet, sepolia).
     /// See risc0_steel::ethereum::chain_spec for available specs.
-    #[arg(long, env = "CHAIN_SPEC", default_value = "mainnet")]
+    #[arg(long, env = "CHAIN_SPEC")]
     chain_spec: String,
 
     /// Optional: Use Multicall3 for fetching balances. Defaults to false (fetch individually).
