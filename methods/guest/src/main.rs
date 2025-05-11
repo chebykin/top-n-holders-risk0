@@ -43,31 +43,31 @@ fn main() {
     // Read the input data passed from the host
     let input: EthEvmInput = env::read();
     let guest_input: GuestInput = env::read();
-    env::log("Guest program started. Input received.");
+    env::log("INFO: Guest program started. Input received.");
 
     // --- 0. Initialize Steel Environment ---
 
-    env::log(&alloc::format!("Setting up EthEvmEnv for chain: {}", guest_input.chain_spec_name));
+    env::log(&alloc::format!("INFO: Setting up EthEvmEnv for chain: {}", guest_input.chain_spec_name));
     let steel_evm_env = match guest_input.chain_spec_name.to_lowercase().as_str() {
         "mainnet" => input.into_env().with_chain_spec(&ETH_MAINNET_CHAIN_SPEC),
         _ => input.into_env(),
     };
-    env::log("EthEvmEnv configured.");
+    env::log("INFO: EthEvmEnv configured.");
 
     // --- 0.5. Verifying inputs ---
-    env::log(&alloc::format!("Verifying input data..."));
+    env::log(&alloc::format!("INFO: Verifying input data..."));
     assert!(!guest_input.required_addresses_desc.is_empty(), "Holders list is empty");
     assert!(guest_input.n > 0, "N must be greater than 0");
     assert!(guest_input.n <= guest_input.required_addresses_desc.len(), "N exceeds number of holders");
 
     // --- 1. Fetch Balances for the required holders ---
-    env::log(&alloc::format!("Fetching balances for {} holders...", guest_input.required_addresses_desc.len()));
+    env::log(&alloc::format!("INFO: Fetching balances for {} holders...", guest_input.required_addresses_desc.len()));
     let erc20_contract = Contract::new(guest_input.erc20_contract_address, &steel_evm_env);
 
     // --- 1. Fetch total supply ---
     let call = IERC20::totalSupplyCall {};
     let total_supply_result = erc20_contract.call_builder(&call).call();
-    env::log(&alloc::format!("Fetched total supply: {}", total_supply_result._0));
+    env::log(&alloc::format!("INFO: Fetched total supply: {}", total_supply_result._0));
 
     // --- 1.5. Verify the total supply ---
     let mut latest_balance: Option<U256> = None;
@@ -83,7 +83,7 @@ fn main() {
         // Check if the balance is gte than the latest balance
 
         if let Some(prev_balance) = latest_balance {
-            env::log(&alloc::format!("Current balance: {}, Latest balance: {}", current_balance_result._0, prev_balance));
+            env::log(&alloc::format!("DEBUG: Current balance: {}, Latest balance: {}", current_balance_result._0, prev_balance));
             assert!(current_balance_result._0 <= prev_balance, "Balance is not lower than or equal to the latest balance");
         }
         latest_balance = Some(current_balance_result._0);
@@ -106,7 +106,7 @@ fn main() {
             // 100 - 84 = 16; sr16 > lb14, false
             // 100 - 90 = 10; sr10 > lb6, false
             // 100 - 96 = 4; sr4 < lb6, true
-            env::log(&alloc::format!("Supply remainder: {}, latest balance: {}", supply_remainder, latest_balance.unwrap()));
+            env::log(&alloc::format!("DEBUG: Supply remainder: {}, latest balance: {}", supply_remainder, latest_balance.unwrap()));
             if supply_remainder < latest_balance.unwrap() {
                 break;
             }
@@ -119,5 +119,5 @@ fn main() {
         final_top_n_addresses: top_desc_holders, // Commit the determined top N
     };
     env::commit(&output);
-    env::log("Commit complete. Exiting guest.");
+    env::log("INFO: Commit complete. Exiting guest.");
 }
