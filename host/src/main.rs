@@ -128,6 +128,7 @@ struct Args {
 async fn main() -> Result<()> {
     // Initialize tracing/logging
     tracing_subscriber::fmt()
+        .compact()
         .with_env_filter(EnvFilter::from_default_env()) // Use RUST_LOG env var
         .init();
 
@@ -141,11 +142,11 @@ async fn main() -> Result<()> {
     let subgraph_url = args.subgraph_url; // String
 
     info!("Configuration:");
-    info!("  ERC20 Contract: {}", erc20_contract_address);
-    info!("  Subgraph URL: {}", subgraph_url);
-    info!("  RPC URL: {}", rpc_url);
-    info!("  Chain Spec: {}", args.chain_spec);
-    info!("  N: {}", n);
+    info!("ERC20 Contract: {}", erc20_contract_address);
+    info!("Subgraph URL: {}", subgraph_url);
+    info!("RPC URL: {}", rpc_url);
+    info!("Chain Spec: {}", args.chain_spec);
+    info!("N: {}", n);
 
     // --- Cache Configuration ---
     let cache_dir = Path::new("./tmp");
@@ -167,7 +168,7 @@ async fn main() -> Result<()> {
         // Deserialize as Vec<Address>.
         all_subgraph_holders = serde_json::from_str(&cached_data)
             .with_context(|| format!("Failed to deserialize cached data from {:?}", cache_file_path))?;
-        info!("  Loaded {} holder addresses from cache.", all_subgraph_holders.len());
+        info!("Loaded {} holder addresses from cache.", all_subgraph_holders.len());
 
     } else {
         if args.cache_subgraph {
@@ -229,14 +230,14 @@ async fn main() -> Result<()> {
             let fetched_holders_page = response_body.data.token_holders;
             let fetched_count = fetched_holders_page.len();
             // Log fetched count without skip
-            info!("  Fetched page with {} holder addresses (last_id='{}')", fetched_count, last_id);
+            info!("Fetched page with {} holder addresses (last_id='{}')", fetched_count, last_id);
 
             if fetched_count == 0 {
                 // No more holders found
                 if last_id.is_empty() { // Check if this was the *first* query
-                    info!("  No holders found for this token in the subgraph.");
+                    info!("No holders found for this token in the subgraph.");
                 } else {
-                    info!("  Finished fetching all holder addresses.");
+                    info!("Finished fetching all holder addresses.");
                 }
                 break;
             }
@@ -261,7 +262,7 @@ async fn main() -> Result<()> {
             // Break if the fetched count is less than the page size (last page)
             if fetched_count < PAGE_SIZE { break; }
         }
-        info!("  Fetched total {} holders from Subgraph.", fetched_holders_list.len());
+        info!("Fetched total {} holders from Subgraph.", fetched_holders_list.len());
 
         // Assign fetched data to the main variable
         all_subgraph_holders = fetched_holders_list;
@@ -276,7 +277,7 @@ async fn main() -> Result<()> {
                 .context("Failed to serialize holder addresses for caching")?;
             fs::write(&cache_file_path, cache_data)
                 .with_context(|| format!("Failed to write cache file: {:?}", cache_file_path))?;
-            info!("  Successfully wrote cache file.");
+            info!("Successfully wrote cache file.");
         }
     }
 
@@ -299,7 +300,7 @@ async fn main() -> Result<()> {
     match args.chain_spec.to_lowercase().as_str() {
         "mainnet" => {
             env = env.with_chain_spec(&ETH_MAINNET_CHAIN_SPEC);
-            info!("  Using ETH_MAINNET_CHAIN_SPEC");
+            info!("Using ETH_MAINNET_CHAIN_SPEC");
         },
         _ => warn!("Chain spec not recognized. These mean the hardfork block numbers are not recognised. Thus there could be issues in proof generation."),
     }
@@ -309,7 +310,7 @@ async fn main() -> Result<()> {
     let call = IERC20::totalSupplyCall {};
 
     info!(
-        "  Calling {} on {}...",
+        "Calling {} on {}...",
         IERC20::totalSupplyCall::SIGNATURE,
         erc20_contract_address
     );
@@ -321,7 +322,7 @@ async fn main() -> Result<()> {
 
     let onchain_total_supply: U256 = result_supply._0;
 
-    info!("  On-chain Total Supply: {}", onchain_total_supply);
+    info!("On-chain Total Supply: {}", onchain_total_supply);
 
     // --- Prepare Input for ZKVM Guest ---
     // The host provides its initial claim for the top N addresses.
@@ -375,7 +376,7 @@ async fn main() -> Result<()> {
     info!("Fetching balances for required addresses from blockchain via risc0-steel...");
 
     if args.multicall3 {
-        info!("  Using Multicall3 to fetch balances...");
+        info!("Using Multicall3 to fetch balances...");
         // --- Multicall3 Setup ---
         // Address of the Multicall3 contract (same on most chains)
         // https://github.com/mds1/multicall
@@ -397,36 +398,36 @@ async fn main() -> Result<()> {
 
         let aggregate_call = IMulticall3::aggregate3Call { calls };
 
-        info!("  Preparing to call aggregate3 on Multicall3 contract at {}", MULTICALL3_ADDRESS);
+        info!("Preparing to call aggregate3 on Multicall3 contract at {}", MULTICALL3_ADDRESS);
         let multicall_results = multicall_contract
             .call_builder(&aggregate_call)
             .call()
             .await
             .context("Failed to call aggregate3 on Multicall3 contract")?;
 
-        info!("  Multicall3 aggregate3 call successful. Processing {} results...", multicall_results.returnData.len());
+        info!("Multicall3 aggregate3 call successful. Processing {} results...", multicall_results.returnData.len());
 
         for (i, result) in multicall_results.returnData.iter().enumerate() {
             let holder_address = required_addresses_desc[i]; // Assuming order is preserved
             if result.success {
                 match IERC20::balanceOfCall::abi_decode_returns(&result.returnData, true) {
                     Ok(decoded_balance) => {
-                        info!("  Successfully fetched balance for {}: {}", holder_address, decoded_balance._0);
+                        info!("Successfully fetched balance for {}: {}", holder_address, decoded_balance._0);
                     }
                     Err(e) => {
-                        error!("  Failed to decode balanceOf return data for {}: {:?}", holder_address, e);
+                        error!("Failed to decode balanceOf return data for {}: {:?}", holder_address, e);
                     }
                 }
             } else {
-                info!("  balanceOf call failed for address {} in multicall", holder_address);
+                info!("balanceOf call failed for address {} in multicall", holder_address);
             }
         }
     } else {
-        info!("  Fetching balances individually (not using Multicall3)...");
+        info!("Fetching balances individually (not using Multicall3)...");
         let mut individual_balances: Vec<(Address, U256)> = Vec::new(); // To store fetched balances if needed
 
         for (i, &holder_address) in required_addresses_desc.iter().enumerate() {
-            info!("  Fetching balance for address {} ({}/{})", holder_address, i + 1, required_addresses_desc.len());
+            info!("Fetching balance for address {} ({}/{})", holder_address, i + 1, required_addresses_desc.len());
             let balance_of_call = IERC20::balanceOfCall { account: holder_address };
             let mut individual_contract_instance = Contract::preflight(erc20_contract_address, &mut env);
 
@@ -437,17 +438,17 @@ async fn main() -> Result<()> {
             {
                 Ok(result_balance) => {
                     let balance: U256 = result_balance._0;
-                    info!("  Successfully fetched balance for {}: {}", holder_address, balance);
+                    info!("Successfully fetched balance for {}: {}", holder_address, balance);
                     individual_balances.push((holder_address, balance));
                     // As before, this is mostly for pre-warming the EVM state for the guest.
                 }
                 Err(e) => {
-                    error!("  Failed to fetch balance for {}: {:?}", holder_address, e);
+                    error!("Failed to fetch balance for {}: {:?}", holder_address, e);
                     // Decide how to handle individual errors, e.g., push a zero balance or skip
                 }
             }
         }
-        info!("  Finished fetching balances individually for {} addresses.", required_addresses_desc.len());
+        info!("Finished fetching balances individually for {} addresses.", required_addresses_desc.len());
     }
 
     let guest_input = GuestInput {
@@ -466,37 +467,37 @@ async fn main() -> Result<()> {
         .build()?;
 
     let prover = default_prover();
-    info!("  Running the prover...");
+    info!("Running the prover...");
     let prove_info = prover.prove(exec_env, TOP_N_HOLDERS_GUEST_ELF)?;
     let receipt = prove_info.receipt;
-    info!("  Proof generated successfully!");
+    info!("Proof generated successfully!");
 
     receipt.verify(TOP_N_HOLDERS_GUEST_ID)?;
-    info!("  Receipt verified locally successfully!");
+    info!("Receipt verified locally successfully!");
 
     // Decode GuestOutput from the journal.
     let guest_output: GuestOutput = receipt.journal.decode()
         .context("Failed to decode GuestOutput from ZKVM journal")?;
 
     info!("Verification Result (from ZK proof journal):");
-    info!("  Guest Verification Succeeded: {}", guest_output.verification_succeeded);
-    info!("  Guest Determined Top {} Addresses: {:?}", n, guest_output.final_top_n_addresses);
-    info!("  (Proof implies guest correctly fetched balances, sorted, checked total supply, and compared against host's claimed Top {} addresses)", n);
+    info!("Guest Verification Succeeded: {}", guest_output.verification_succeeded);
+    info!("Guest Determined Top {} Addresses: {:?}", n, guest_output.final_top_n_addresses);
+    info!("(Proof implies guest correctly fetched balances, sorted, checked total supply, and compared against host's claimed Top {} addresses)", n);
 
     info!("Data for On-Chain Verification:");
-    info!("  Image ID: {:?}", TOP_N_HOLDERS_GUEST_ID);
-    info!("  Journal (Hex): 0x{}", hex::encode(&receipt.journal.bytes));
+    info!("Image ID: {:?}", TOP_N_HOLDERS_GUEST_ID);
+    info!("Journal (Hex): 0x{}", hex::encode(&receipt.journal.bytes));
 
     if guest_output.verification_succeeded {
         info!("Conclusion: The ZK proof confirms the guest correctly determined the Top {} holders, verified total supply, and that these match the host's initial claim.", n);
-        info!("  The determined Top {} addresses by the guest are: {:?}", n, guest_output.final_top_n_addresses);
+        info!("The determined Top {} addresses by the guest are: {:?}", n, guest_output.final_top_n_addresses);
     } else {
         error!("Conclusion: The ZK proof indicates a discrepancy or failure in guest execution.");
-        error!("  This could be due to: total supply mismatch, or the guest's determined Top-N differs from the host's claimed Top-N, or other internal guest error.");
+        error!("This could be due to: total supply mismatch, or the guest's determined Top-N differs from the host's claimed Top-N, or other internal guest error.");
         if !guest_output.final_top_n_addresses.is_empty() {
-             warn!("  Guest's determined Top {} addresses (if available): {:?}", n, guest_output.final_top_n_addresses);
+             warn!("Guest's determined Top {} addresses (if available): {:?}", n, guest_output.final_top_n_addresses);
         } else {
-            warn!("  Guest did not determine/output Top-N addresses, or an earlier error occurred (e.g., balance fetch, total supply mismatch).");
+            warn!("Guest did not determine/output Top-N addresses, or an earlier error occurred (e.g., balance fetch, total supply mismatch).");
         }
     }
 
