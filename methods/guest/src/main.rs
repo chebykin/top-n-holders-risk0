@@ -16,6 +16,7 @@ use alloy_sol_types::{sol};
 use risc0_steel::{
     ethereum::{
         ETH_MAINNET_CHAIN_SPEC,
+        ETH_SEPOLIA_CHAIN_SPEC,
     },
     Contract,
 };
@@ -49,8 +50,10 @@ fn main() {
 
     env::log(&alloc::format!("INFO: Setting up EthEvmEnv for chain: {}", guest_input.chain_spec_name));
     let steel_evm_env = match guest_input.chain_spec_name.to_lowercase().as_str() {
-        "mainnet" => input.into_env().with_chain_spec(&ETH_MAINNET_CHAIN_SPEC),
-        _ => input.into_env(),
+        "mainnet" => input.into_env(&ETH_MAINNET_CHAIN_SPEC),
+        "sepolia" => input.into_env(&ETH_SEPOLIA_CHAIN_SPEC),
+        "gnosis" => input.into_env(&top_n_holders_core::GNOSIS_MAINNET_CHAIN_SPEC),
+        _ => panic!("Chain spec not supported: {}", guest_input.chain_spec_name),
     };
     env::log("INFO: EthEvmEnv configured.");
 
@@ -67,7 +70,7 @@ fn main() {
     // --- 1. Fetch total supply ---
     let call = IERC20::totalSupplyCall {};
     let total_supply_result = erc20_contract.call_builder(&call).call();
-    env::log(&alloc::format!("INFO: Fetched total supply: {}", total_supply_result._0));
+    env::log(&alloc::format!("INFO: Fetched total supply: {}", total_supply_result));
 
     // --- 1.5. Verify the total supply ---
     let mut latest_balance: Option<U256> = None;
@@ -83,11 +86,11 @@ fn main() {
         // Check if the balance is gte than the latest balance
 
         if let Some(prev_balance) = latest_balance {
-            env::log(&alloc::format!("DEBUG: Current balance: {}, Latest balance: {}", current_balance_result._0, prev_balance));
-            assert!(current_balance_result._0 <= prev_balance, "Balance is not lower than or equal to the latest balance");
+            env::log(&alloc::format!("DEBUG: Current balance: {}, Latest balance: {}", current_balance_result, prev_balance));
+            assert!(current_balance_result <= prev_balance, "Balance is not lower than or equal to the latest balance");
         }
-        latest_balance = Some(current_balance_result._0);
-        top_holders_accumulated += current_balance_result._0;
+        latest_balance = Some(current_balance_result);
+        top_holders_accumulated += current_balance_result;
         top_desc_holders.push(*holder_address);
         i += 1;
 
@@ -100,7 +103,7 @@ fn main() {
         // E has 6, cumulative 96
         // F has 2, cumulative 98
         if i > guest_input.n {
-            let supply_remainder: U256 = total_supply_result._0 - top_holders_accumulated;
+            let supply_remainder: U256 = total_supply_result - top_holders_accumulated;
             assert!(supply_remainder > U256::ZERO, "Top N holders exceed total supply");
 
             // 100 - 84 = 16; sr16 > lb14, false

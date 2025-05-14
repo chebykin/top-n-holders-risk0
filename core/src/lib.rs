@@ -1,5 +1,9 @@
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
+use risc0_steel::config::{ChainSpec, ForkCondition};
+use revm_primitives::hardfork::SpecId;
 
 // GuestInput: Data passed from the host to the ZKVM guest program.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -18,12 +22,32 @@ pub struct GuestOutput {
     pub final_top_n_addresses: Vec<Address>, // The Top-N addresses determined by the guest.
 }
 
-//// The Gnosis Mainnet [ChainSpec] (Block numbers could be incorrect).
-// pub static GNOSIS_MAINNET_CHAIN_SPEC: LazyLock<ChainSpec> = LazyLock::new(|| ChainSpec {
-//     chain_id: 100,
-//     forks: BTreeMap::from([
-//         (SpecId::MERGE, ForkCondition::Block(25139031)),    // Approx. Dec 8, 2022
-//         (SpecId::SHANGHAI, ForkCondition::Timestamp(1689076787)), // July 11, 2023
-//         (SpecId::CANCUN, ForkCondition::Timestamp(1710167400)), // March 11, 2024, 14:30 UTC
-//     ]),
-// });
+pub type GnosisChainSpec = ChainSpec<SpecId>;
+
+/// The Gnosis Mainnet [ChainSpec].
+pub static GNOSIS_MAINNET_CHAIN_SPEC: LazyLock<GnosisChainSpec> = LazyLock::new(|| ChainSpec {
+    chain_id: 100, // Gnosis Chain Mainnet ID
+    forks: BTreeMap::from([
+        // Gnosis Chain Merge (Bellatrix+Paris)
+        // Activated at block 24,424,400
+        // Source: GnosisScan and community announcements
+        (SpecId::MERGE, ForkCondition::Block(24_424_400)),
+
+        // Gnosis Chain Shapella (Shanghai+Capella)
+        // Activated at timestamp 1689076800 (July 11, 2023, 12:00:00 PM UTC)
+        // Source: https://docs.gnosischain.com/about/history/upgrades#shapella-upgrade
+        (SpecId::SHANGHAI, ForkCondition::Timestamp(1689076800)),
+
+        // Gnosis Chain Dencun (Deneb+Cancun)
+        // Activated at timestamp 1710160200 (March 11, 2024, 12:30:00 PM UTC)
+        // Source: https://docs.gnosischain.com/about/history/upgrades#dencun-upgrade
+        (SpecId::CANCUN, ForkCondition::Timestamp(1710160200)),
+
+        // Prague/Pectra on Gnosis - Projected/TBD
+        // Gnosis typically follows Ethereum mainnet hardforks.
+        // This timestamp is a placeholder based on Ethereum Mainnet's projection
+        // and should be updated when official Gnosis plans are announced.
+        // Ethereum Mainnet Prague projection from your example: 1746612311
+        (SpecId::PRAGUE, ForkCondition::Timestamp(1746612311)), // Placeholder, align with ETH Mainnet or update when Gnosis announces
+    ]),
+});

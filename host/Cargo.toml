@@ -7,7 +7,7 @@ edition = "2021"
 top-n-holders-core = { workspace = true }
 
 alloy-primitives = { workspace = true }
-alloy = { version = "0.12", features = ["default"] } # For Ethereum interaction
+alloy = { version = "1.0.1", features = ["default"] } # For Ethereum interaction
 
 clap = { version = "4", features = ["derive", "env"] }
 risc0-zkvm = { workspace = true }

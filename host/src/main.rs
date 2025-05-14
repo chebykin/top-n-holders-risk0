@@ -4,7 +4,9 @@ use risc0_zkvm::{default_prover, ExecutorEnv};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr; // For parsing Address with clap
 use std::fs; // For file system operations (cache)
-use std::path::Path; // For path manipulation (cache)
+use std::path::Path;
+
+// For path manipulation (cache)
 
 // --- Clap Imports ---
 use clap::Parser;
@@ -25,6 +27,7 @@ use url::Url; // For parsing URLs via clap
 
 // --- Reqwest Alias ---
 use reqwest::Client as SubgraphReqwestClient;
+use risc0_steel::ethereum::ETH_SEPOLIA_CHAIN_SPEC;
 use tracing::{error, info, trace, warn};
 // Import guest ELF and Image ID
 use top_n_holders_guest_methods::{TOP_N_HOLDERS_GUEST_ELF, TOP_N_HOLDERS_GUEST_ID};
@@ -290,20 +293,20 @@ async fn main() -> Result<()> {
 
     // --- Fetch Total Supply from Blockchain (using risc0-steel) ---
     info!("Fetching total supply from blockchain via risc0-steel...");
+    let chain_spec = match args.chain_spec.to_lowercase().as_str() {
+        "mainnet" => &ETH_MAINNET_CHAIN_SPEC,
+        "sepolia" => &ETH_SEPOLIA_CHAIN_SPEC,
+        "gnosis" => &top_n_holders_core::GNOSIS_MAINNET_CHAIN_SPEC,
+
+        _ => panic!("Chain spec not supported"),
+    };
 
     let mut env = EthEvmEnv::builder()
         .rpc(rpc_url.clone()) // Ensure rpc_url is correctly passed
+        .chain_spec(chain_spec)
         .build()
         .await
         .context("Failed to build EthEvmEnv from RPC")?;
-
-    match args.chain_spec.to_lowercase().as_str() {
-        "mainnet" => {
-            env = env.with_chain_spec(&ETH_MAINNET_CHAIN_SPEC);
-            info!("Using ETH_MAINNET_CHAIN_SPEC");
-        },
-        _ => warn!("Chain spec not recognized. These mean the hardfork block numbers are not recognised. Thus there could be issues in proof generation."),
-    }
 
     let mut contract = Contract::preflight(erc20_contract_address, &mut env);
 
@@ -320,7 +323,7 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to call totalSupply via EthEvmEnv")?;
 
-    let onchain_total_supply: U256 = result_supply._0;
+    let onchain_total_supply: U256 = result_supply;
 
     info!("On-chain Total Supply: {}", onchain_total_supply);
 
@@ -405,14 +408,14 @@ async fn main() -> Result<()> {
             .await
             .context("Failed to call aggregate3 on Multicall3 contract")?;
 
-        info!("Multicall3 aggregate3 call successful. Processing {} results...", multicall_results.returnData.len());
+        info!("Multicall3 aggregate3 call successful. Processing {} results...", multicall_results.len());
 
-        for (i, result) in multicall_results.returnData.iter().enumerate() {
+        for (i, result) in multicall_results.iter().enumerate() {
             let holder_address = required_addresses_desc[i]; // Assuming order is preserved
             if result.success {
-                match IERC20::balanceOfCall::abi_decode_returns(&result.returnData, true) {
+                match IERC20::balanceOfCall::abi_decode_returns(&result.returnData) {
                     Ok(decoded_balance) => {
-                        info!("Successfully fetched balance for {}: {}", holder_address, decoded_balance._0);
+                        info!("Successfully fetched balance for {}: {}", holder_address, decoded_balance);
                     }
                     Err(e) => {
                         error!("Failed to decode balanceOf return data for {}: {:?}", holder_address, e);
@@ -437,7 +440,7 @@ async fn main() -> Result<()> {
                 .await
             {
                 Ok(result_balance) => {
-                    let balance: U256 = result_balance._0;
+                    let balance: U256 = result_balance;
                     info!("Successfully fetched balance for {}: {}", holder_address, balance);
                     individual_balances.push((holder_address, balance));
                     // As before, this is mostly for pre-warming the EVM state for the guest.
